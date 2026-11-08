@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 /* ------------------------------------------------------------------ 配色 */
 
@@ -756,7 +757,7 @@ static int list_visible_rows(int h) {
 
 /* ---------------- 底部可点按钮 ---------------- */
 
-enum { UI_RUN = 0, UI_RESET, UI_SKIP, UI_LIST, UI_EDIT, UI_OPA, UI_COUNT };
+enum { UI_RUN = 0, UI_RESET, UI_SKIP, UI_LIST, UI_EDIT, UI_QUIT, UI_COUNT };
 
 typedef struct {
     int id;
@@ -771,13 +772,20 @@ static int g_ui_hover = -1;
 static int g_ui_press = -1;
 static int g_ui_tracking = 0;
 
+/* 切换待办的常驻状态；收起时立刻生效，不等当前轮播窗口走完 */
+static void list_toggle_pin(void) {
+    g_list_pinned = !g_list_pinned;
+    if (g_list_pinned) g_list_clock = 0;
+    else g_list_clock = (double)g_list_dur;   /* 让当前显示窗口立即过期 */
+}
+
 static void ui_layout(int w, int h) {
     float k = kk(h);
     float bh = k * 42.0f;
     float gap = k * 10.0f;
     float y = h - k * 100.0f;
     float x = margin_l(w);
-    static const float widths[UI_COUNT] = { 92, 76, 76, 76, 76, 92 };
+    static const float widths[UI_COUNT] = { 92, 76, 76, 96, 96, 76 };
 
     for (int i = 0; i < UI_COUNT; i++) {
         g_ui[i].id = i;
@@ -793,7 +801,7 @@ static void ui_layout(int w, int h) {
     wcscpy(g_ui[UI_SKIP].label, L"跳过");
     wcscpy(g_ui[UI_LIST].label, g_list_pinned ? L"收起待办" : L"待办");
     wcscpy(g_ui[UI_EDIT].label, L"编辑待办");
-    wcscpy(g_ui[UI_OPA].label, L"透明度");
+    wcscpy(g_ui[UI_QUIT].label, L"退出");
     (void)w;
     g_ui_ready = 1;
 }
@@ -1700,6 +1708,8 @@ static void show_editor(void) {
 
 /* ------------------------------------------------------------------ 主窗口 */
 
+static wchar_t g_title_shown[256];
+
 static void update_title(void) {
     wchar_t remain[16];
     fmt_seconds(g_pomo.remaining, remain, 16);
@@ -1707,7 +1717,12 @@ static void update_title(void) {
              phase_name_w(g_pomo.phase), remain,
              g_pomo.running ? L"运行中" : L"已暂停",
              g_pomo.completed, g_ntodos - todo_done_count());
-    SetWindowTextW(g_hwnd, g_title);
+    /* 16ms 定时器每秒调用它 60 次，只有内容真变了才 SetWindowText */
+    if (wcscmp(g_title, g_title_shown) != 0) {
+        wcsncpy(g_title_shown, g_title, 255);
+        g_title_shown[255] = 0;
+        SetWindowTextW(g_hwnd, g_title);
+    }
 }
 
 static void apply_opacity(void) {
@@ -1760,7 +1775,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE:
         g_hwnd = hwnd;
-        SetTimer(hwnd, 1, 100, NULL);
+        SetTimer(hwnd, 1, 16, NULL);
         return 0;
 
     case WM_TIMER: {
@@ -1778,8 +1793,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             target = (t < g_list_dur) ? 1 : 0;
         }
         double speed = dt / 0.45;
+        double prev_alpha = g_list_alpha;
         if (g_list_alpha < target) g_list_alpha = fmin(target, g_list_alpha + speed);
         else if (g_list_alpha > target) g_list_alpha = fmax(target, g_list_alpha - speed);
+        int animating = (g_list_alpha != prev_alpha);
 
         if (g_breath_period > 1.0)
             g_breath_phase = fmod(g_breath_phase + dt * 6.283185307179586 / g_breath_period,
@@ -1787,18 +1804,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         update_title();
 
-        /* 不在前台时没必要 10fps：降到约 2fps，省电省 CPU。
-           自己就是前台、或者编辑窗口开着，才保持流畅刷新。 */
+        /* 按需重绘：淡入淡出期间 60fps（16ms 定时器），
+           其余时间只在秒数或呼吸档位变化时刷一次，静止时几乎不耗 CPU。 */
         {
-            HWND fg = GetForegroundWindow();
-            int active = (fg == hwnd) || (g_editor && IsWindowVisible(g_editor) &&
-                                          (fg == g_editor || IsChild(g_editor, fg)));
-            static int idle_tick = 0;
-            if (active) {
-                idle_tick = 0;
-                InvalidateRect(hwnd, NULL, FALSE);
-            } else if (++idle_tick >= 5) {
-                idle_tick = 0;
+            static int last_sec = -1, last_bucket = -1;
+            int sec_now = (int)time(NULL);
+            int bucket = ((int)((0.5 + 0.5 * sin(g_breath_phase)) * 255.0)) & ~7;
+            int need = animating;
+
+            if (sec_now != last_sec) { last_sec = sec_now; need = 1; }
+            if (bucket != last_bucket) { last_bucket = bucket; need = 1; }
+
+            if (need) {
+                HWND fg = GetForegroundWindow();
+                int active = (fg == hwnd) || (g_editor && IsWindowVisible(g_editor) &&
+                                              (fg == g_editor || IsChild(g_editor, fg)));
+                /* 不在前台时把瞬时动画降到 15fps，别白烧 CPU */
+                static int skips = 0;
+                if (animating && !active) {
+                    if (++skips % 4 != 0) return 0;
+                } else {
+                    skips = 0;
+                }
                 InvalidateRect(hwnd, NULL, FALSE);
             }
         }
@@ -1832,14 +1859,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                   InvalidateRect(hwnd, NULL, FALSE); return 0;
         case 'T': case VK_F6: g_opacity_index++; apply_opacity(); return 0;
         case VK_F11: toggle_fullscreen(); return 0;
-        case 'L': g_list_pinned = !g_list_pinned;
-                  if (g_list_pinned) g_list_clock = 0;
+        case 'L': list_toggle_pin();
                   InvalidateRect(hwnd, NULL, FALSE); return 0;
 
         case 'E':
         case VK_F2: show_editor(); return 0;
-        case VK_F3: g_list_pinned = !g_list_pinned;
-                    if (g_list_pinned) g_list_clock = 0;
+        case VK_F3: list_toggle_pin();
                     InvalidateRect(hwnd, NULL, FALSE); return 0;
         case VK_UP:
             if (g_ntodos) {
@@ -1902,16 +1927,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 pomo_skip(&g_pomo);
                 break;
             case UI_LIST:
-                g_list_pinned = !g_list_pinned;
-                if (g_list_pinned) g_list_clock = 0;
+                list_toggle_pin();
                 break;
             case UI_EDIT:
                 show_editor();
                 break;
-            case UI_OPA:
-                g_opacity_index++;
-                apply_opacity();
-                break;
+            case UI_QUIT:
+                DestroyWindow(hwnd);
+                return 0;
             }
             update_title();
         }
