@@ -690,6 +690,8 @@ static int bg_image_load(const wchar_t *path) {
 }
 
 
+#define BG_DIV 2   /* 背景按 1/2 分辨率渲染+合成，再拉伸到全屏：省 4 倍合成开销 */
+
 static void render_background2(int w, int h, int slot, double glow_scale) {
     HDC *pdc = &g_bgdc[slot];
     HBITMAP *pbmp = &g_bgbmp[slot];
@@ -703,8 +705,9 @@ static void render_background2(int w, int h, int slot, double glow_scale) {
     BITMAPINFO bi;
     memset(&bi, 0, sizeof bi);
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = w;
-    bi.bmiHeader.biHeight = -h;
+    int bw = (w + BG_DIV - 1) / BG_DIV, bh2 = (h + BG_DIV - 1) / BG_DIV;
+    bi.bmiHeader.biWidth = bw;
+    bi.bmiHeader.biHeight = -bh2;
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = BI_RGB;
@@ -716,6 +719,8 @@ static void render_background2(int w, int h, int slot, double glow_scale) {
     GdipCreateFromHDC(*pdc, &g);
     if (!g) return;
     GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+    /* 之后所有绘制仍用全屏坐标，由世界变换缩到半分辨率 */
+    GdipScaleWorldTransform(g, 1.0 / BG_DIV, 1.0 / BG_DIV, MatrixOrderAppend);
 
     RectF full = { 0, 0, (REAL)w, (REAL)h };
 
@@ -777,8 +782,9 @@ static void composite_bg(int w, int h, int alpha) {
         BITMAPINFO bi;
         memset(&bi, 0, sizeof bi);
         bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bi.bmiHeader.biWidth = w;
-        bi.bmiHeader.biHeight = -h;
+        int bw2 = (w + BG_DIV - 1) / BG_DIV, bh3 = (h + BG_DIV - 1) / BG_DIV;
+        bi.bmiHeader.biWidth = bw2;
+        bi.bmiHeader.biHeight = -bh3;
         bi.bmiHeader.biPlanes = 1;
         bi.bmiHeader.biBitCount = 32;
         bi.bmiHeader.biCompression = BI_RGB;
@@ -790,13 +796,14 @@ static void composite_bg(int w, int h, int alpha) {
         g_bgc_alpha = -1;
     }
     if (alpha == g_bgc_alpha) return;
-    BitBlt(g_bgc, 0, 0, w, h, g_bgdc[0], 0, 0, SRCCOPY);
+    int bw = (w + BG_DIV - 1) / BG_DIV, bh2 = (h + BG_DIV - 1) / BG_DIV;
+    BitBlt(g_bgc, 0, 0, bw, bh2, g_bgdc[0], 0, 0, SRCCOPY);
     BLENDFUNCTION bf;
     bf.BlendOp = AC_SRC_OVER;
     bf.BlendFlags = 0;
     bf.SourceConstantAlpha = (BYTE)alpha;
     bf.AlphaFormat = 0;
-    AlphaBlend(g_bgc, 0, 0, w, h, g_bgdc[1], 0, 0, w, h, bf);
+    AlphaBlend(g_bgc, 0, 0, bw, bh2, g_bgdc[1], 0, 0, bw, bh2, bf);
     g_bgc_alpha = alpha;
 }
 
@@ -941,7 +948,7 @@ static void ui_layout(int w, int h) {
     float gap = k * 10.0f;
     float y = h - k * 100.0f;
     float x = margin_l(w);
-    static const float widths[UI_COUNT] = { 92, 76, 76, 96, 96, 76 };
+    static const float widths[UI_COUNT] = { 92, 76, 76, 96, 76, 76 };
 
     for (int i = 0; i < UI_COUNT; i++) {
         g_ui[i].id = i;
@@ -956,7 +963,7 @@ static void ui_layout(int w, int h) {
     wcscpy(g_ui[UI_RESET].label, L"重置");
     wcscpy(g_ui[UI_SKIP].label, L"跳过");
     wcscpy(g_ui[UI_LIST].label, g_list_pinned ? L"收起待办" : L"待办");
-    wcscpy(g_ui[UI_EDIT].label, L"编辑待办");
+    wcscpy(g_ui[UI_EDIT].label, L"设置");
     wcscpy(g_ui[UI_QUIT].label, L"退出");
     (void)w;
     g_ui_ready = 1;
@@ -970,6 +977,52 @@ static int ui_hit(int mx, int my) {
             return i;
     }
     return -1;
+}
+
+/* 时钟位图缓存：184px 的大字用 GDI+ 每次重画要 10ms+，
+   而呼吸每秒要重绘好几次。缓存成 ARGB 位图后，其余帧直接 AlphaBlend。 */
+static GpBitmap *g_ck_bmp = NULL;
+static int g_ck_w = 0, g_ck_h = 0, g_ck_size = 0;
+static wchar_t g_ck_str[16] = { 0 };
+
+static GpBitmap *clock_cache(const wchar_t *s, GpFont *f, int size_px, RectF bounds) {
+    int wpx = (int)ceilf(bounds.Width) + 8;
+    int hpx = (int)ceilf(bounds.Height) + 8;
+    if (wpx < 8) wpx = 8;
+    if (hpx < 8) hpx = 8;
+
+    if (g_ck_bmp && g_ck_size == size_px && !wcscmp(g_ck_str, s)) return g_ck_bmp;
+
+    if (g_ck_bmp) { GdipDisposeImage((GpImage *)g_ck_bmp); g_ck_bmp = NULL; }
+    GpBitmap *bmp = NULL;
+    if (GdipCreateBitmapFromScan0(wpx, hpx, 0, PixelFormat32bppPARGB, NULL, &bmp) != Ok || !bmp)
+        return NULL;
+
+    GpGraphics *bg2 = NULL;
+    if (GdipGetImageGraphicsContext((GpImage *)bmp, &bg2) != Ok || !bg2) {
+        GdipDisposeImage((GpImage *)bmp);
+        return NULL;
+    }
+    GdipSetTextRenderingHint(bg2, TextRenderingHintAntiAlias);
+    GdipSetSmoothingMode(bg2, SmoothingModeAntiAlias);
+    GdipSetCompositingMode(bg2, CompositingModeSourceCopy);
+    GpSolidFill *clr = NULL;
+    GdipCreateSolidFill(0, &clr);
+    if (clr) { GdipFillRectangle(bg2, (GpBrush *)clr, 0, 0, (REAL)wpx, (REAL)hpx);
+               GdipDeleteBrush((GpBrush *)clr); }
+    GdipSetCompositingMode(bg2, CompositingModeSourceOver);
+
+    text_draw_a(bg2, s, f, C_TEXT, 255, 4.0f, 0.0f,
+                (float)wpx - 8.0f, (REAL)hpx, 0);
+    GdipDeleteGraphics(bg2);
+
+    g_ck_bmp = bmp;
+    g_ck_w = wpx;
+    g_ck_h = hpx;
+    g_ck_size = size_px;
+    wcsncpy(g_ck_str, s, 15);
+    g_ck_str[15] = 0;
+    return bmp;
 }
 
 /* 左：时钟 + 番茄钟，全部贴左边距 */
@@ -996,9 +1049,15 @@ static void paint_clock_block(GpGraphics *g, int w, int h) {
         size *= 0.94;
         f = font_get((int)size, FONT_DISPLAY);
     }
-    text_draw_a(g, clock, f, C_TEXT, 255, x0,
-                (float)(cy - bounds.Height * 0.5),
-                (float)(w - x0 * 2), (float)bounds.Height, 0);
+    {
+        GpBitmap *ck = clock_cache(clock, f, (int)size, bounds);
+        if (ck) {
+            GdipDrawImageRectI(g, (GpImage *)ck,
+                               (INT)(x0 - 4),
+                               (INT)(cy - g_ck_h * 0.5),
+                               g_ck_w, g_ck_h);
+        }
+    }
 
     /* 日期 */
     static const wchar_t *wd[] = { L"星期日", L"星期一", L"星期二", L"星期三",
@@ -1238,9 +1297,13 @@ static void paint(HDC target, int w, int h) {
        亮的是极光本身（光晕 45% ↔ 145%），不是盖一层灰。 */
     {
         double t01 = 0.5 + 0.5 * sin(g_breath_phase);
-        int alpha = ((int)(t01 * 255.0)) & ~15;     /* 量化到 16 档，重绘频率减半 */
+        int alpha = ((int)(t01 * 255.0)) & ~7;      /* 量化到 32 档，肉眼平滑 */
         composite_bg(w, h, alpha);
-        if (g_bgc) BitBlt(g_memdc, 0, 0, w, h, g_bgc, 0, 0, SRCCOPY);
+        if (g_bgc) {
+            int bw = (w + BG_DIV - 1) / BG_DIV, bh2 = (h + BG_DIV - 1) / BG_DIV;
+            SetStretchBltMode(g_memdc, COLORONCOLOR);
+            StretchBlt(g_memdc, 0, 0, w, h, g_bgc, 0, 0, bw, bh2, SRCCOPY);
+        }
     }
 
     RectF full = { 0, 0, (REAL)w, (REAL)h };
@@ -1312,7 +1375,7 @@ static void paint(HDC target, int w, int h) {
 
         /* 按钮下方一行极简提示 */
         GpFont *f_hint = font_get((int)(k * 13), FONT_UI);
-        text_draw_a(g, L"空格 开始/暂停   ·   F11 窗口   ·   Esc 退出", f_hint, C_DIM, 200,
+        text_draw_a(g, L"空格 开始/暂停   ·   E 设置   ·   F11 窗口   ·   Esc 退出", f_hint, C_DIM, 200,
                     margin_l(w), (float)(h - k * 44), (float)(w - margin_l(w) * 2),
                     (float)(k * 22), 0);
     }
@@ -2030,7 +2093,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         {
             static int last_sec = -1, last_bucket = -1;
             int sec_now = (int)time(NULL);
-            int bucket = ((int)((0.5 + 0.5 * sin(g_breath_phase)) * 255.0)) & ~15;
+            int bucket = ((int)((0.5 + 0.5 * sin(g_breath_phase)) * 255.0)) & ~7;
             int need = animating;
             int bucket_changed = 0;
 
