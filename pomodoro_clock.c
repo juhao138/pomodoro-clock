@@ -754,6 +754,60 @@ static int list_visible_rows(int h) {
     return rows < 1 ? 1 : rows;
 }
 
+/* ---------------- 底部可点按钮 ---------------- */
+
+enum { UI_RUN = 0, UI_RESET, UI_SKIP, UI_LIST, UI_EDIT, UI_OPA, UI_COUNT };
+
+typedef struct {
+    int id;
+    wchar_t label[24];
+    float x, y, w, h;
+    int primary;      /* 1 = 强调色实心 */
+} UiButton;
+
+static UiButton g_ui[UI_COUNT];
+static int g_ui_ready = 0;
+static int g_ui_hover = -1;
+static int g_ui_press = -1;
+static int g_ui_tracking = 0;
+
+static void ui_layout(int w, int h) {
+    float k = kk(h);
+    float bh = k * 42.0f;
+    float gap = k * 10.0f;
+    float y = h - k * 100.0f;
+    float x = margin_l(w);
+    static const float widths[UI_COUNT] = { 92, 76, 76, 76, 76, 92 };
+
+    for (int i = 0; i < UI_COUNT; i++) {
+        g_ui[i].id = i;
+        g_ui[i].x = x;
+        g_ui[i].y = y;
+        g_ui[i].w = k * widths[i];
+        g_ui[i].h = bh;
+        g_ui[i].primary = (i == UI_RUN);
+        x += g_ui[i].w + gap;
+    }
+    wcscpy(g_ui[UI_RUN].label, g_pomo.running ? L"暂停" : L"开始");
+    wcscpy(g_ui[UI_RESET].label, L"重置");
+    wcscpy(g_ui[UI_SKIP].label, L"跳过");
+    wcscpy(g_ui[UI_LIST].label, g_list_pinned ? L"收起待办" : L"待办");
+    wcscpy(g_ui[UI_EDIT].label, L"编辑待办");
+    wcscpy(g_ui[UI_OPA].label, L"透明度");
+    (void)w;
+    g_ui_ready = 1;
+}
+
+static int ui_hit(int mx, int my) {
+    if (!g_ui_ready) return -1;
+    for (int i = 0; i < UI_COUNT; i++) {
+        if (mx >= g_ui[i].x && mx <= g_ui[i].x + g_ui[i].w &&
+            my >= g_ui[i].y && my <= g_ui[i].y + g_ui[i].h)
+            return i;
+    }
+    return -1;
+}
+
 /* 左：时钟 + 番茄钟，全部贴左边距 */
 static void paint_clock_block(GpGraphics *g, int w, int h) {
     float k = kk(h);
@@ -1044,13 +1098,37 @@ static void paint(HDC target, int w, int h) {
     paint_clock_block(g, w, h);
     paint_todo_card(g, w, h, a);
 
-    /* 底部提示：贴左下，和时钟对齐 */
-    GpFont *f_hint = font_get((int)(k * 15), FONT_UI);
-    const wchar_t *hint = g_pomo.running
-        ? L"空格 暂停  ·  R/F4 重置  ·  N/F5 跳过  ·  L/F3 待办  ·  E/F2 编辑  ·  T/F6 透明度  ·  F11 窗口  ·  Esc 退出"
-        : L"空格 开始  ·  R/F4 重置  ·  N/F5 跳过  ·  L/F3 待办  ·  E/F2 编辑  ·  T/F6 透明度  ·  F11 窗口  ·  Esc 退出";
-    text_draw_a(g, hint, f_hint, C_MUTED, 200, margin_l(w), (float)(h - k * 62),
-                (float)(w - margin_l(w) * 2), (float)(k * 26), 0);
+    /* 底部：一排可点的毛玻璃按钮 */
+    ui_layout(w, h);
+    {
+        unsigned accent = phase_color(g_pomo.phase);
+        GpFont *f_btn = font_get((int)(k * 16), FONT_UI);
+        for (int i = 0; i < UI_COUNT; i++) {
+            UiButton *b = &g_ui[i];
+            int hover = (g_ui_hover == i);
+            int press = (g_ui_press == i);
+            float bx = b->x, by = b->y + (press ? k * 1.0f : 0.0f);
+            float bw = b->w, bh = b->h;
+            float rad = bh * 0.5f;                     /* 药丸形 */
+
+            if (b->primary) {
+                fill_round(g, argb(accent, press ? 235 : hover ? 215 : 190), bx, by, bw, bh, rad);
+                stroke_round(g, argb(accent, 210), bx, by, bw, bh, rad, 1.0f);
+                text_draw_a(g, b->label, f_btn, 0xFFFFFF, 255, bx, by, bw, bh, 1);
+            } else {
+                /* 毛玻璃：白色低透明度叠在背景上，带 1px 描边 */
+                fill_round(g, argb(0xFFFFFF, press ? 52 : hover ? 38 : 22), bx, by, bw, bh, rad);
+                stroke_round(g, argb(0xFFFFFF, hover ? 90 : 60), bx, by, bw, bh, rad, 1.0f);
+                text_draw_a(g, b->label, f_btn, 0xF4F7FC, hover ? 255 : 225, bx, by, bw, bh, 1);
+            }
+        }
+
+        /* 按钮下方一行极简提示 */
+        GpFont *f_hint = font_get((int)(k * 13), FONT_UI);
+        text_draw_a(g, L"空格 开始/暂停   ·   F11 窗口   ·   Esc 退出", f_hint, C_DIM, 200,
+                    margin_l(w), (float)(h - k * 44), (float)(w - margin_l(w) * 2),
+                    (float)(k * 22), 0);
+    }
 
     BitBlt(target, 0, 0, w, h, g_memdc, 0, 0, SRCCOPY);
 }
@@ -1780,12 +1858,84 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
 
+    case WM_MOUSEMOVE: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int hit = ui_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        if (hit != g_ui_hover) {
+            g_ui_hover = hit;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        if (!g_ui_tracking) {
+            TRACKMOUSEEVENT tme = { sizeof tme, TME_LEAVE, hwnd, 0 };
+            TrackMouseEvent(&tme);
+            g_ui_tracking = 1;
+        }
+        return 0;
+    }
+
+    case WM_MOUSELEAVE:
+        g_ui_tracking = 0;
+        if (g_ui_hover != -1) {
+            g_ui_hover = -1;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+
+    case WM_LBUTTONUP: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
+        int hit = ui_hit(mx, my);
+        int was = g_ui_press;
+        g_ui_press = -1;
+        ReleaseCapture();
+        if (was >= 0 && was == hit) {
+            switch (was) {
+            case UI_RUN:
+                g_pomo.running = !g_pomo.running;
+                break;
+            case UI_RESET:
+                pomo_reset(&g_pomo);
+                break;
+            case UI_SKIP:
+                pomo_skip(&g_pomo);
+                break;
+            case UI_LIST:
+                g_list_pinned = !g_list_pinned;
+                if (g_list_pinned) g_list_clock = 0;
+                break;
+            case UI_EDIT:
+                show_editor();
+                break;
+            case UI_OPA:
+                g_opacity_index++;
+                apply_opacity();
+                break;
+            }
+            update_title();
+        }
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    }
+
     case WM_LBUTTONDOWN: {
         RECT rc;
         GetClientRect(hwnd, &rc);
         int w = rc.right, h = rc.bottom;
         float k = kk(h);
         int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
+
+        /* 先看有没有点在底部按钮上 */
+        {
+            int hit = ui_hit(mx, my);
+            if (hit >= 0) {
+                g_ui_press = hit;
+                SetCapture(hwnd);
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+        }
 
         /* 点进度环：开始/暂停 */
         double radius = k * 78.0;
@@ -1815,9 +1965,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
-    case WM_SETCURSOR:
-        SetCursor(LoadCursorW(NULL, IDC_ARROW));
+    case WM_SETCURSOR: {
+        POINT pt;
+        GetCursorPos(&pt);
+        ScreenToClient(hwnd, &pt);
+        if (ui_hit(pt.x, pt.y) >= 0)
+            SetCursor(LoadCursorW(NULL, IDC_HAND));
+        else
+            SetCursor(LoadCursorW(NULL, IDC_ARROW));
         return TRUE;
+    }
 
     case WM_DESTROY:
         KillTimer(hwnd, 1);
