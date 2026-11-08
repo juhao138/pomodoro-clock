@@ -1996,18 +1996,21 @@ int main(int argc, char **argv) {
 
     if (want_help) {
         printf("用法: 桌面时钟番茄钟 [选项]\n"
-               "  --work N        专注分钟（默认 25）\n"
-               "  --short N       短休分钟（默认 5）\n"
-               "  --long N        长休分钟（默认 15）\n"
-               "  --list-every N  每隔 N 秒显示待办（默认 30，0=不自动显示）\n"
-               "  --list-dur N    每次显示 M 秒（默认 8）\n"
-               "  --todo-file P   指定待办清单文件\n"
-               "  --window        窗口模式启动\n"
-               "  --mute          不响提示音\n"
-               "  --test-chime    试听阶段切换的提示音\n"
-               "  --selftest      只跑自测\n"
-               "按键: 空格 开始/暂停 · R 重置 · N 跳过 · L 待办开关 · E 编辑待办\n"
-               "      ↑↓ 选择待办 · T 透明度 · F11 窗口/全屏 · Esc 退出\n");
+               "  --work N          专注分钟（默认 25）\n"
+               "  --short N         短休分钟（默认 5）\n"
+               "  --long N          长休分钟（默认 15）\n"
+               "  --list-every N    每隔 N 秒浮出待办（默认 30，0=不自动浮出）\n"
+               "  --list-dur N      每次浮出 M 秒（默认 8）\n"
+               "  --breath-period N 背景明暗循环周期，秒（默认 26）\n"
+               "  --todo-file P     指定待办清单文件\n"
+               "  --window          窗口模式启动\n"
+               "  --opacity N       启动时的透明度档位（0=不透明）\n"
+               "  --mute            不响提示音\n"
+               "  --test-chime      试听提示音后退出\n"
+               "  --font-check      打印实际使用的字体\n"
+               "  --selftest        只跑 26 项自测，不开窗口\n"
+               "按键: 空格 开始/暂停 · R/F4 重置 · N/F5 跳过 · L/F3 待办 · E/F2 编辑\n"
+               "      T/F6 透明度 · F11 窗口/全屏 · Esc 退出\n");
         return 0;
     }
 
