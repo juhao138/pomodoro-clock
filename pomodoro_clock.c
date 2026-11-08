@@ -15,6 +15,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <imm.h>
 #include <gdiplus.h>
 #include <stdio.h>
@@ -276,6 +277,7 @@ static HWND g_hwnd;
 static HWND g_editor;
 static HWND g_ed_edit, g_ed_list, g_ed_add, g_ed_toggle, g_ed_delete, g_ed_close;
 static HWND g_ed_title, g_ed_hint;
+static HWND g_bg_section, g_bg_path_lbl, g_bg_pick, g_bg_clear;
 static HFONT g_ed_font, g_ed_font_title;
 static HBRUSH g_ed_bg_brush, g_ed_edit_brush;
 static RECT g_ed_field, g_ed_list_rect;
@@ -605,6 +607,88 @@ static void glow(GpGraphics *g, float cx, float cy, float r,
 static HDC g_bgdc[2];
 static HBITMAP g_bgbmp[2];
 static int g_bg_w, g_bg_h;
+static int g_bgc_alpha;      /* 合成缓存的当前 alpha 档，-1 = 失效 */
+
+/* ---------------- 自定义背景图片 ---------------- */
+
+static wchar_t g_bg_image[MAX_PATH] = { 0 };   /* 空 = 不用图片 */
+static GpImage *g_bg_img = NULL;
+static wchar_t g_settings_path[MAX_PATH] = { 0 };
+
+static void settings_path_init(void) {
+    wchar_t exedir[MAX_PATH] = { 0 };
+    GetModuleFileNameW(NULL, exedir, MAX_PATH);
+    wchar_t *slash = wcsrchr(exedir, L'\\');
+    if (slash) *slash = 0;
+    swprintf(g_settings_path, MAX_PATH, L"%s\\settings.ini", exedir);
+}
+
+static void settings_load(void) {
+    if (!g_settings_path[0]) return;
+    FILE *f = _wfopen(g_settings_path, L"r, ccs=UTF-8");
+    if (!f) return;
+    wchar_t line[1024];
+    while (fgetws(line, 1024, f)) {
+        size_t n = wcslen(line);
+        while (n && (line[n-1] == L'\n' || line[n-1] == L'\r')) line[--n] = 0;
+        if (!wcsncmp(line, L"bg_image=", 9)) {
+            wcsncpy(g_bg_image, line + 9, MAX_PATH - 1);
+            g_bg_image[MAX_PATH - 1] = 0;
+        }
+    }
+    fclose(f);
+}
+
+static void settings_save(void) {
+    if (!g_settings_path[0]) return;
+    FILE *f = _wfopen(g_settings_path, L"w, ccs=UTF-8");
+    if (!f) return;
+    fwprintf(f, L"bg_image=%ls\n", g_bg_image);
+    fclose(f);
+}
+
+static void bg_image_free(void) {
+    if (g_bg_img) { GdipDisposeImage(g_bg_img); g_bg_img = NULL; }
+    g_bg_w = 0;
+    g_bg_h = 0;
+    g_bgc_alpha = -1;
+}
+
+static int bg_image_load(const wchar_t *path) {
+    bg_image_free();
+    GpBitmap *src = NULL;
+    if (GdipCreateBitmapFromFile(path, &src) != Ok || !src) return 0;
+
+    /* 预缩放到屏幕尺寸：原图可能几千万像素，留着既占内存又拖慢重绘 */
+    UINT iw = 0, ih = 0;
+    GdipGetImageWidth((GpImage *)src, &iw);
+    GdipGetImageHeight((GpImage *)src, &ih);
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
+
+    if (iw > (UINT)(sw * 1.2) || ih > (UINT)(sh * 1.2)) {
+        double sc = (double)sw * 1.2 / (double)iw;
+        double sy = (double)sh * 1.2 / (double)ih;
+        if (sy > sc) sc = sy;
+        int nw = (int)(iw * sc), nh = (int)(ih * sc);
+        GpBitmap *dst = NULL;
+        if (GdipCreateBitmapFromScan0(nw, nh, 0, PixelFormat32bppPARGB, NULL, &dst) == Ok && dst) {
+            GpGraphics *g = NULL;
+            if (GdipGetImageGraphicsContext((GpImage *)dst, &g) == Ok && g) {
+                GdipSetInterpolationMode(g, InterpolationModeHighQualityBicubic);
+                GdipDrawImageRectI(g, (GpImage *)src, 0, 0, nw, nh);
+                GdipDeleteGraphics(g);
+                GdipDisposeImage((GpImage *)src);
+                g_bg_img = (GpImage *)dst;
+                return 1;
+            }
+            GdipDisposeImage((GpImage *)dst);
+        }
+    }
+    g_bg_img = (GpImage *)src;
+    return 1;
+}
+
 
 static void render_background2(int w, int h, int slot, double glow_scale) {
     HDC *pdc = &g_bgdc[slot];
@@ -634,18 +718,45 @@ static void render_background2(int w, int h, int slot, double glow_scale) {
     GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
 
     RectF full = { 0, 0, (REAL)w, (REAL)h };
-    GpLineGradient *lg = NULL;
-    GdipCreateLineBrushFromRect(&full, (ARGB)0xFF141A30, (ARGB)0xFF090D18,
-                                LinearGradientModeForwardDiagonal, WrapModeTileFlipXY, &lg);
-    if (lg) {
-        GdipFillRectangle(g, (GpBrush *)lg, 0, 0, (REAL)w, (REAL)h);
-        GdipDeleteBrush((GpBrush *)lg);
+
+    if (g_bg_img) {
+        UINT iw = 0, ih = 0;
+        GdipGetImageWidth(g_bg_img, &iw);
+        GdipGetImageHeight(g_bg_img, &ih);
+        if (iw && ih) {
+            double sx = (double)w / (double)iw, sy = (double)h / (double)ih;
+            double sc = sx > sy ? sx : sy;
+            float dw = (float)(iw * sc), dh = (float)(ih * sc);
+            float dx = ((float)w - dw) / 2.0f, dy = ((float)h - dh) / 2.0f;
+            GdipSetInterpolationMode(g, InterpolationModeHighQualityBicubic);
+            GdipDrawImageRectI(g, g_bg_img, (INT)dx, (INT)dy, (INT)dw, (INT)dh);
+            GdipSetInterpolationMode(g, InterpolationModeDefault);
+        }
+        int dark = (int)(120.0 + (1.45 - glow_scale) * 75.0);
+        if (dark > 210) dark = 210;
+        if (dark < 100) dark = 100;
+        GpSolidFill *ov = NULL;
+        GdipCreateSolidFill((ARGB)((((unsigned)dark) << 24) | 0x0A0E18u), &ov);
+        if (ov) {
+            GdipFillRectangle(g, (GpBrush *)ov, 0, 0, (REAL)w, (REAL)h);
+            GdipDeleteBrush((GpBrush *)ov);
+        }
+    } else {
+        GpLineGradient *lg = NULL;
+        GdipCreateLineBrushFromRect(&full, (ARGB)0xFF141A30, (ARGB)0xFF090D18,
+                                    LinearGradientModeForwardDiagonal, WrapModeTileFlipXY, &lg);
+        if (lg) {
+            GdipFillRectangle(g, (GpBrush *)lg, 0, 0, (REAL)w, (REAL)h);
+            GdipDeleteBrush((GpBrush *)lg);
+        }
     }
 
+    if (!g_bg_img) {
     glow(g, w * 0.06f, h * 0.70f, w * 0.40f, 0xFF6B5A, (int)(11 * glow_scale));
     glow(g, w * 0.97f, h * 0.00f, w * 0.46f, 0x5B7BFF, (int)(15 * glow_scale));
     glow(g, w * 0.58f, h * 0.96f, w * 0.38f, 0x2FD3A0, (int)(7 * glow_scale));
     glow(g, w * 0.00f, h * 0.00f, w * 0.30f, 0x8E6BFF, (int)(9 * glow_scale));
+    }
 
     GdipDeleteGraphics(g);
 }
@@ -654,7 +765,6 @@ static void render_background2(int w, int h, int slot, double glow_scale) {
 static HDC g_bgc;
 static HBITMAP g_bgcbmp;
 static int g_bgc_w, g_bgc_h;
-static int g_bgc_alpha = -1;
 
 static void composite_bg(int w, int h, int alpha) {
     if (!g_bgdc[0] || !g_bgdc[1]) return;
@@ -772,11 +882,57 @@ static int g_ui_hover = -1;
 static int g_ui_press = -1;
 static int g_ui_tracking = 0;
 
+/* 选择背景图片 */
+static int pick_image(wchar_t *out, int cap) {
+    OPENFILENAMEW ofn;
+    memset(&ofn, 0, sizeof ofn);
+    wchar_t buf[MAX_PATH] = { 0 };
+    ofn.lStructSize = sizeof ofn;
+    ofn.hwndOwner = g_editor ? g_editor : g_hwnd;
+    ofn.lpstrFilter = L"图片 (*.jpg;*.jpeg;*.png;*.bmp;*.gif)\0*.jpg;*.jpeg;*.png;*.bmp;*.gif\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"选择背景图片";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+    if (!GetOpenFileNameW(&ofn)) return 0;
+    wcsncpy(out, buf, (size_t)cap - 1);
+    out[cap - 1] = 0;
+    return 1;
+}
+
+static void bg_apply(const wchar_t *path) {
+    if (path && path[0]) {
+        if (!bg_image_load(path)) {
+            MessageBoxW(g_editor ? g_editor : g_hwnd, L"这个图片读不了，换一张试试。",
+                        L"背景图片", MB_ICONWARNING);
+            return;
+        }
+        wcsncpy(g_bg_image, path, MAX_PATH - 1);
+        g_bg_image[MAX_PATH - 1] = 0;
+    } else {
+        g_bg_image[0] = 0;
+        bg_image_free();
+    }
+    settings_save();
+    if (g_hwnd) InvalidateRect(g_hwnd, NULL, TRUE);
+}
+
 /* 切换待办的常驻状态；收起时立刻生效，不等当前轮播窗口走完 */
 static void list_toggle_pin(void) {
     g_list_pinned = !g_list_pinned;
     if (g_list_pinned) g_list_clock = 0;
     else g_list_clock = (double)g_list_dur;   /* 让当前显示窗口立即过期 */
+}
+
+/* 颜色混合：t=0 取 a，t=1 取 b */
+static unsigned mixc(unsigned a, unsigned b, double t) {
+    int r = (int)(((a >> 16) & 0xFF) * (1 - t) + ((b >> 16) & 0xFF) * t);
+    int g = (int)(((a >> 8) & 0xFF) * (1 - t) + ((b >> 8) & 0xFF) * t);
+    int bl = (int)((a & 0xFF) * (1 - t) + (b & 0xFF) * t);
+    if (r > 255) r = 255;
+    if (g > 255) g = 255;
+    if (bl > 255) bl = 255;
+    return ((unsigned)r << 16) | ((unsigned)g << 8) | (unsigned)bl;
 }
 
 static void ui_layout(int w, int h) {
@@ -794,7 +950,7 @@ static void ui_layout(int w, int h) {
         g_ui[i].w = k * widths[i];
         g_ui[i].h = bh;
         g_ui[i].primary = (i == UI_RUN);
-        x += g_ui[i].w + gap;
+        x += g_ui[i].w + (i == UI_RUN ? gap * 2.2f : gap);
     }
     wcscpy(g_ui[UI_RUN].label, g_pomo.running ? L"暂停" : L"开始");
     wcscpy(g_ui[UI_RESET].label, L"重置");
@@ -1082,7 +1238,7 @@ static void paint(HDC target, int w, int h) {
        亮的是极光本身（光晕 45% ↔ 145%），不是盖一层灰。 */
     {
         double t01 = 0.5 + 0.5 * sin(g_breath_phase);
-        int alpha = ((int)(t01 * 255.0)) & ~7;      /* 量化，减少重合成 */
+        int alpha = ((int)(t01 * 255.0)) & ~15;     /* 量化到 16 档，重绘频率减半 */
         composite_bg(w, h, alpha);
         if (g_bgc) BitBlt(g_memdc, 0, 0, w, h, g_bgc, 0, 0, SRCCOPY);
     }
@@ -1120,14 +1276,37 @@ static void paint(HDC target, int w, int h) {
             float rad = bh * 0.5f;                     /* 药丸形 */
 
             if (b->primary) {
-                fill_round(g, argb(accent, press ? 235 : hover ? 215 : 190), bx, by, bw, bh, rad);
-                stroke_round(g, argb(accent, 210), bx, by, bw, bh, rad, 1.0f);
+                /* 主按钮：阶段色竖向渐变（上亮下暗），像有光照 */
+                unsigned top_c = mixc(accent, 0xFFFFFF, hover ? 0.22 : 0.14);
+                unsigned bot_c = mixc(accent, 0x000000, press ? 0.22 : 0.10);
+                GpPath *pill = round_rect_path(bx, by, bw, bh, rad);
+                if (pill && GdipSetClipPath(g, pill, CombineModeReplace) == Ok) {
+                    RectF rb = { bx, by, bw, bh };
+                    GpLineGradient *grad = NULL;
+                    GdipCreateLineBrushFromRect(&rb,
+                                                (ARGB)argb(top_c, press ? 235 : 230),
+                                                (ARGB)argb(bot_c, press ? 235 : 230),
+                                                LinearGradientModeVertical,
+                                                WrapModeTileFlipXY, &grad);
+                    if (grad) {
+                        GdipFillRectangle(g, (GpBrush *)grad, bx, by, bw, bh);
+                        GdipDeleteBrush((GpBrush *)grad);
+                    }
+                    GdipResetClip(g);
+                }
+                if (pill) GdipDeletePath(pill);
+                stroke_round(g, argb(mixc(accent, 0xFFFFFF, 0.25), 200), bx, by, bw, bh, rad, 1.0f);
+                /* 顶部内高光 */
+                fill_round(g, argb(0xFFFFFF, 46), bx + rad * 0.55f, by + 1.0f,
+                           bw - rad * 1.1f, (float)fmax(1.0, k * 1.0), 0.5f);
                 text_draw_a(g, b->label, f_btn, 0xFFFFFF, 255, bx, by, bw, bh, 1);
             } else {
-                /* 毛玻璃：白色低透明度叠在背景上，带 1px 描边 */
-                fill_round(g, argb(0xFFFFFF, press ? 52 : hover ? 38 : 22), bx, by, bw, bh, rad);
-                stroke_round(g, argb(0xFFFFFF, hover ? 90 : 60), bx, by, bw, bh, rad, 1.0f);
-                text_draw_a(g, b->label, f_btn, 0xF4F7FC, hover ? 255 : 225, bx, by, bw, bh, 1);
+                /* 毛玻璃：白色低透明度 + 1px 描边 + 顶部内高光 */
+                fill_round(g, argb(0xFFFFFF, press ? 54 : hover ? 40 : 24), bx, by, bw, bh, rad);
+                stroke_round(g, argb(0xFFFFFF, hover ? 95 : 62), bx, by, bw, bh, rad, 1.0f);
+                fill_round(g, argb(0xFFFFFF, 26), bx + rad * 0.55f, by + 1.0f,
+                           bw - rad * 1.1f, (float)fmax(1.0, k * 1.0), 0.5f);
+                text_draw_a(g, b->label, f_btn, 0xF4F7FC, hover ? 255 : 228, bx, by, bw, bh, 1);
             }
         }
 
@@ -1146,7 +1325,8 @@ static void paint(HDC target, int w, int h) {
 enum {
     ID_ED_EDIT = 300, ID_ED_ADD = 301, ID_ED_LIST = 302,
     ID_ED_TOGGLE = 303, ID_ED_DEL = 304, ID_ED_CLOSE = 305, ID_ED_TITLE = 306,
-    ID_ED_HINT = 307
+    ID_ED_HINT = 307,
+    ID_BG_SECTION = 310, ID_BG_PATH = 311, ID_BG_PICK = 312, ID_BG_CLEAR = 313
 };
 
 static void ed_refresh_list(void) {
@@ -1488,6 +1668,18 @@ static LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        case ID_BG_PICK: {
+            wchar_t path[MAX_PATH] = { 0 };
+            if (pick_image(path, MAX_PATH)) {
+                bg_apply(path);
+                SetWindowTextW(g_bg_path_lbl, g_bg_image[0] ? g_bg_image : L"未设置（用内置渐变）");
+            }
+            return 0;
+        }
+        case ID_BG_CLEAR:
+            bg_apply(NULL);
+            SetWindowTextW(g_bg_path_lbl, L"未设置（用内置渐变）");
+            return 0;
         case ID_ED_CLOSE:
             ShowWindow(hwnd, SW_HIDE);
             if (g_hwnd) SetForegroundWindow(g_hwnd);
@@ -1549,6 +1741,7 @@ static void ed_layout(HWND hwnd) {
     GetClientRect(hwnd, &rc);
     int w = rc.right, h = rc.bottom;
     int pad = 18, row = 34, btn_h = 36;
+    int k_bg = 118;      /* 底部背景图片区 */
 
     MoveWindow(g_ed_title, pad, pad - 4, w - pad * 2, 26, TRUE);
 
@@ -1563,7 +1756,7 @@ static void ed_layout(HWND hwnd) {
     MoveWindow(g_ed_add, fx + fw + 8, fy, 88, row, TRUE);
 
     int listy = fy + row + 14;
-    int avail = h - listy - btn_h - pad - 42;
+    int avail = h - listy - btn_h - pad - 42 - k_bg;
     int item_h = 32;
     int listh = (avail / item_h) * item_h;      /* 整行，避免半行被裁 */
     if (listh < item_h) listh = item_h;
@@ -1578,6 +1771,13 @@ static void ed_layout(HWND hwnd) {
     MoveWindow(g_ed_delete, pad + 120, by, 88, btn_h, TRUE);
     MoveWindow(g_ed_close, w - pad - 88, by, 88, btn_h, TRUE);
     MoveWindow(g_ed_hint, pad, by + btn_h + 8, w - pad * 2, 22, TRUE);
+
+    /* 背景图片区 */
+    int bs = by + btn_h + 8 + 30;
+    MoveWindow(g_bg_section, pad, bs, w - pad * 2, 22, TRUE);
+    MoveWindow(g_bg_path_lbl, pad, bs + 24, w - pad * 2, 22, TRUE);
+    MoveWindow(g_bg_pick, pad, bs + 52, 120, 32, TRUE);
+    MoveWindow(g_bg_clear, pad + 128, bs + 52, 84, 32, TRUE);
 
     InvalidateRect(hwnd, NULL, TRUE);
 }
@@ -1639,8 +1839,8 @@ static void show_editor(void) {
     }
 
     if (!g_editor) {
-        int W = 560, H = 520;
-        g_editor = CreateWindowExW(WS_EX_TOPMOST, L"PomodoroTodoEditor", L"待办清单",
+        int W = 600, H = 640;
+        g_editor = CreateWindowExW(WS_EX_TOPMOST, L"PomodoroTodoEditor", L"设置",
                                    WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX,
                                    CW_USEDEFAULT, CW_USEDEFAULT, W, H,
                                    NULL, NULL, hinst, NULL);
@@ -1674,13 +1874,29 @@ static void show_editor(void) {
                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                      0, 0, 10, 10, g_editor,
                                      (HMENU)(INT_PTR)ID_ED_CLOSE, hinst, NULL);
+        g_bg_section = CreateWindowExW(0, L"STATIC", L"背景图片", WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                       0, 0, 10, 10, g_editor,
+                                       (HMENU)(INT_PTR)ID_BG_SECTION, hinst, NULL);
+        g_bg_path_lbl = CreateWindowExW(0, L"STATIC", L"未设置（用内置渐变）",
+                                        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS,
+                                        0, 0, 10, 10, g_editor,
+                                        (HMENU)(INT_PTR)ID_BG_PATH, hinst, NULL);
+        g_bg_pick = CreateWindowExW(0, L"BUTTON", L"选择图片…",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                    0, 0, 10, 10, g_editor,
+                                    (HMENU)(INT_PTR)ID_BG_PICK, hinst, NULL);
+        g_bg_clear = CreateWindowExW(0, L"BUTTON", L"清除",
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                     0, 0, 10, 10, g_editor,
+                                     (HMENU)(INT_PTR)ID_BG_CLEAR, hinst, NULL);
         g_ed_hint = CreateWindowExW(0, L"STATIC", L"回车添加  ·  双击切换完成  ·  选中后 Del 删除",
                                     WS_CHILD | WS_VISIBLE | SS_LEFT,
                                     0, 0, 10, 10, g_editor,
                                     (HMENU)(INT_PTR)ID_ED_HINT, hinst, NULL);
 
-        HWND all[] = { g_ed_edit, g_ed_add, g_ed_list,
-                       g_ed_toggle, g_ed_delete, g_ed_close, g_ed_hint };
+        HWND all[] = { g_ed_edit, g_ed_add, g_ed_list, g_ed_toggle, g_ed_delete,
+                       g_ed_close, g_ed_hint, g_bg_section, g_bg_path_lbl,
+                       g_bg_pick, g_bg_clear };
         for (int i = 0; i < (int)(sizeof all / sizeof all[0]); i++)
             SendMessageW(all[i], WM_SETFONT, (WPARAM)g_ed_font, TRUE);
         SendMessageW(g_ed_title, WM_SETFONT, (WPARAM)g_ed_font_title, TRUE);
@@ -1694,11 +1910,16 @@ static void show_editor(void) {
         ebtn_track(g_ed_toggle);
         ebtn_track(g_ed_delete);
         ebtn_track(g_ed_close);
+        ebtn_track(g_bg_pick);
+        ebtn_track(g_bg_clear);
         editor_dark_chrome();
         ed_refresh_list();
     } else {
         ed_refresh_list();
     }
+
+    if (g_bg_path_lbl)
+        SetWindowTextW(g_bg_path_lbl, g_bg_image[0] ? g_bg_image : L"未设置（用内置渐变）");
 
     ShowWindow(g_editor, SW_SHOW);
     ed_layout(g_editor);
@@ -1809,16 +2030,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         {
             static int last_sec = -1, last_bucket = -1;
             int sec_now = (int)time(NULL);
-            int bucket = ((int)((0.5 + 0.5 * sin(g_breath_phase)) * 255.0)) & ~7;
+            int bucket = ((int)((0.5 + 0.5 * sin(g_breath_phase)) * 255.0)) & ~15;
             int need = animating;
+            int bucket_changed = 0;
 
             if (sec_now != last_sec) { last_sec = sec_now; need = 1; }
-            if (bucket != last_bucket) { last_bucket = bucket; need = 1; }
+            if (bucket != last_bucket) { last_bucket = bucket; need = 1; bucket_changed = 1; }
 
             if (need) {
                 HWND fg = GetForegroundWindow();
                 int active = (fg == hwnd) || (g_editor && IsWindowVisible(g_editor) &&
                                               (fg == g_editor || IsChild(g_editor, fg)));
+                /* 后台时连呼吸都不刷，只保留秒针 */
+                if (!active && !animating && bucket_changed) return 0;
                 /* 不在前台时把瞬时动画降到 15fps，别白烧 CPU */
                 static int skips = 0;
                 if (animating && !active) {
@@ -2148,6 +2372,17 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) want_help = 1;
         if (!strcmp(argv[i], "--window")) g_fullscreen = 0;
         if (!strcmp(argv[i], "--mute")) g_mute = 1;
+        if (!strcmp(argv[i], "--bg-image") && i + 1 < argc) {
+            int n = MultiByteToWideChar(CP_UTF8, 0, argv[++i], -1, NULL, 0);
+            if (n > 0) {
+                wchar_t *w2 = malloc(sizeof(wchar_t) * (size_t)n);
+                if (w2) {
+                    MultiByteToWideChar(CP_UTF8, 0, argv[i], -1, w2, n);
+                    wcsncpy(g_bg_image, w2, MAX_PATH - 1);
+                    free(w2);
+                }
+            }
+        }
         if (!strcmp(argv[i], "--breath-phase") && i + 1 < argc)
             g_breath_phase = atof(argv[++i]);
         if (!strcmp(argv[i], "--breath-period") && i + 1 < argc) {
@@ -2161,6 +2396,12 @@ int main(int argc, char **argv) {
             ULONG_PTR tok = 0;
             if (GdiplusStartup(&tok, &gi2, NULL) != Ok) return 1;
             resolve_families();
+
+    if (g_bg_image[0]) {
+        if (!bg_image_load(g_bg_image)) {
+            g_bg_image[0] = 0;      /* 图片失效就退回内置渐变 */
+        }
+    }
             {
                 char a[256] = { 0 }, b[256] = { 0 };
                 WideCharToMultiByte(CP_UTF8, 0,
@@ -2244,6 +2485,8 @@ int main(int argc, char **argv) {
     }
 
     g_pomo.total = g_pomo.remaining = g_pomo.work_min * 60.0;
+    settings_path_init();
+    settings_load();
     if (!g_todo_path[0]) todo_path_init();
     todo_load();
 
@@ -2257,6 +2500,12 @@ int main(int argc, char **argv) {
     }
 
     resolve_families();
+
+    if (g_bg_image[0]) {
+        if (!bg_image_load(g_bg_image)) {
+            g_bg_image[0] = 0;      /* 图片失效就退回内置渐变 */
+        }
+    }
 
     SetProcessDPIAware();
 
