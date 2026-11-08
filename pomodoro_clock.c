@@ -297,7 +297,7 @@ static int g_list_pinned = 0;
 
 /* 背景动态明暗：一个很慢的正弦，周期默认 26 秒 */
 static double g_breath_phase = 0.0;
-static double g_breath_period = 26.0;
+static double g_breath_period = 18.0;
 
 static wchar_t g_title[256];
 
@@ -599,18 +599,20 @@ static void glow(GpGraphics *g, float cx, float cy, float r,
     }
 }
 
-/* 背景只画一次，缓存成位图；每帧直接贴 */
-static HDC g_bgdc;
-static HBITMAP g_bgbmp;
+/* 背景缓存两张：暗相（光晕弱）+ 亮相（光晕强），逐帧 AlphaBlend 交叉淡入，
+   这样呼吸的是极光本身，不是盖一层灰。 */
+static HDC g_bgdc[2];
+static HBITMAP g_bgbmp[2];
 static int g_bg_w, g_bg_h;
 
-static void render_background(int w, int h) {
-    if (w == g_bg_w && h == g_bg_h && g_bgdc) return;
-    if (g_bgdc) { DeleteDC(g_bgdc); g_bgdc = NULL; }
-    if (g_bgbmp) { DeleteObject(g_bgbmp); g_bgbmp = NULL; }
+static void render_background2(int w, int h, int slot, double glow_scale) {
+    HDC *pdc = &g_bgdc[slot];
+    HBITMAP *pbmp = &g_bgbmp[slot];
+    if (*pdc) { DeleteDC(*pdc); *pdc = NULL; }
+    if (*pbmp) { DeleteObject(*pbmp); *pbmp = NULL; }
 
     HDC screen = GetDC(NULL);
-    g_bgdc = CreateCompatibleDC(screen);
+    *pdc = CreateCompatibleDC(screen);
     ReleaseDC(NULL, screen);
 
     BITMAPINFO bi;
@@ -622,11 +624,11 @@ static void render_background(int w, int h) {
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = BI_RGB;
     void *bits = NULL;
-    g_bgbmp = CreateDIBSection(g_bgdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
-    SelectObject(g_bgdc, g_bgbmp);
+    *pbmp = CreateDIBSection(*pdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    SelectObject(*pdc, *pbmp);
 
     GpGraphics *g = NULL;
-    GdipCreateFromHDC(g_bgdc, &g);
+    GdipCreateFromHDC(*pdc, &g);
     if (!g) return;
     GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
 
@@ -639,12 +641,58 @@ static void render_background(int w, int h) {
         GdipDeleteBrush((GpBrush *)lg);
     }
 
-    glow(g, w * 0.06f, h * 0.70f, w * 0.40f, 0xFF6B5A, 11);
-    glow(g, w * 0.97f, h * 0.00f, w * 0.46f, 0x5B7BFF, 15);
-    glow(g, w * 0.58f, h * 0.96f, w * 0.38f, 0x2FD3A0, 7);
-    glow(g, w * 0.00f, h * 0.00f, w * 0.30f, 0x8E6BFF, 9);
+    glow(g, w * 0.06f, h * 0.70f, w * 0.40f, 0xFF6B5A, (int)(11 * glow_scale));
+    glow(g, w * 0.97f, h * 0.00f, w * 0.46f, 0x5B7BFF, (int)(15 * glow_scale));
+    glow(g, w * 0.58f, h * 0.96f, w * 0.38f, 0x2FD3A0, (int)(7 * glow_scale));
+    glow(g, w * 0.00f, h * 0.00f, w * 0.30f, 0x8E6BFF, (int)(9 * glow_scale));
 
     GdipDeleteGraphics(g);
+}
+
+/* 合成结果缓存：alpha 量化到 8 的倍数，只有跨档时才重新 AlphaBlend */
+static HDC g_bgc;
+static HBITMAP g_bgcbmp;
+static int g_bgc_w, g_bgc_h;
+static int g_bgc_alpha = -1;
+
+static void composite_bg(int w, int h, int alpha) {
+    if (!g_bgdc[0] || !g_bgdc[1]) return;
+    if (!g_bgc || w != g_bgc_w || h != g_bgc_h) {
+        if (g_bgc) { DeleteDC(g_bgc); g_bgc = NULL; }
+        if (g_bgcbmp) { DeleteObject(g_bgcbmp); g_bgcbmp = NULL; }
+        HDC screen = GetDC(NULL);
+        g_bgc = CreateCompatibleDC(screen);
+        ReleaseDC(NULL, screen);
+        BITMAPINFO bi;
+        memset(&bi, 0, sizeof bi);
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void *bits = NULL;
+        g_bgcbmp = CreateDIBSection(g_bgc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+        SelectObject(g_bgc, g_bgcbmp);
+        g_bgc_w = w;
+        g_bgc_h = h;
+        g_bgc_alpha = -1;
+    }
+    if (alpha == g_bgc_alpha) return;
+    BitBlt(g_bgc, 0, 0, w, h, g_bgdc[0], 0, 0, SRCCOPY);
+    BLENDFUNCTION bf;
+    bf.BlendOp = AC_SRC_OVER;
+    bf.BlendFlags = 0;
+    bf.SourceConstantAlpha = (BYTE)alpha;
+    bf.AlphaFormat = 0;
+    AlphaBlend(g_bgc, 0, 0, w, h, g_bgdc[1], 0, 0, w, h, bf);
+    g_bgc_alpha = alpha;
+}
+
+static void render_background(int w, int h) {
+    if (w == g_bg_w && h == g_bg_h && g_bgdc[0] && g_bgdc[1]) return;
+    render_background2(w, h, 0, 0.45);    /* 暗相：光晕 45% */
+    render_background2(w, h, 1, 1.45);    /* 亮相：光晕 145% */
     g_bg_w = w;
     g_bg_h = h;
 }
@@ -967,28 +1015,14 @@ static void paint(HDC target, int w, int h) {
     if (k > 3.0f) k = 3.0f;
 
     render_background(w, h);
-    if (g_bgdc) BitBlt(g_memdc, 0, 0, w, h, g_bgdc, 0, 0, SRCCOPY);
 
-    /* 动态明暗：正弦驱动一层极淡的黑色/白色 veil。
-       亮的一侧略微压暗（最多约 11%），暗的一侧略微提亮（最多约 6%），
-       周期 26 秒，缓慢到几乎察觉不到在动，但眼睛能感觉到「活着」。 */
+    /* 呼吸：暗相 → 亮相交叉淡入。t 在 0..1 之间按正弦摆动，
+       亮的是极光本身（光晕 45% ↔ 145%），不是盖一层灰。 */
     {
-        double s = sin(g_breath_phase);
-        unsigned veil_rgb = 0x000000;
-        int veil_a = 0;
-        if (s > 0) {
-            veil_a = (int)(s * 32.0);
-        } else {
-            veil_rgb = 0xFFFFFF;
-            veil_a = (int)(-s * 5.0);
-        }
-        if (veil_a > 0) {
-            GpSolidFill *vb = brush_new(argb(veil_rgb, veil_a));
-            if (vb) {
-                GdipFillRectangle(g, (GpBrush *)vb, 0, 0, (REAL)w, (REAL)h);
-                GdipDeleteBrush((GpBrush *)vb);
-            }
-        }
+        double t01 = 0.5 + 0.5 * sin(g_breath_phase);
+        int alpha = ((int)(t01 * 255.0)) & ~7;      /* 量化，减少重合成 */
+        composite_bg(w, h, alpha);
+        if (g_bgc) BitBlt(g_memdc, 0, 0, w, h, g_bgc, 0, 0, SRCCOPY);
     }
 
     RectF full = { 0, 0, (REAL)w, (REAL)h };
@@ -1674,7 +1708,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                   6.283185307179586);
 
         update_title();
-        InvalidateRect(hwnd, NULL, FALSE);
+
+        /* 不在前台时没必要 10fps：降到约 2fps，省电省 CPU。
+           自己就是前台、或者编辑窗口开着，才保持流畅刷新。 */
+        {
+            HWND fg = GetForegroundWindow();
+            int active = (fg == hwnd) || (g_editor && IsWindowVisible(g_editor) &&
+                                          (fg == g_editor || IsChild(g_editor, fg)));
+            static int idle_tick = 0;
+            if (active) {
+                idle_tick = 0;
+                InvalidateRect(hwnd, NULL, FALSE);
+            } else if (++idle_tick >= 5) {
+                idle_tick = 0;
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+        }
         return 0;
     }
 
