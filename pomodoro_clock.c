@@ -295,6 +295,10 @@ static double g_list_clock = 0;
 static double g_list_alpha = 0;
 static int g_list_pinned = 0;
 
+/* 背景动态明暗：一个很慢的正弦，周期默认 26 秒 */
+static double g_breath_phase = 0.0;
+static double g_breath_period = 26.0;
+
 static wchar_t g_title[256];
 
 /* GDI+ */
@@ -964,6 +968,29 @@ static void paint(HDC target, int w, int h) {
 
     render_background(w, h);
     if (g_bgdc) BitBlt(g_memdc, 0, 0, w, h, g_bgdc, 0, 0, SRCCOPY);
+
+    /* 动态明暗：正弦驱动一层极淡的黑色/白色 veil。
+       亮的一侧略微压暗（最多约 11%），暗的一侧略微提亮（最多约 6%），
+       周期 26 秒，缓慢到几乎察觉不到在动，但眼睛能感觉到「活着」。 */
+    {
+        double s = sin(g_breath_phase);
+        unsigned veil_rgb = 0x000000;
+        int veil_a = 0;
+        if (s > 0) {
+            veil_a = (int)(s * 32.0);
+        } else {
+            veil_rgb = 0xFFFFFF;
+            veil_a = (int)(-s * 5.0);
+        }
+        if (veil_a > 0) {
+            GpSolidFill *vb = brush_new(argb(veil_rgb, veil_a));
+            if (vb) {
+                GdipFillRectangle(g, (GpBrush *)vb, 0, 0, (REAL)w, (REAL)h);
+                GdipDeleteBrush((GpBrush *)vb);
+            }
+        }
+    }
+
     RectF full = { 0, 0, (REAL)w, (REAL)h };
 
     /* 左上角竖向强调条：替代原来的小圆点，给左上角一个视觉锚点，
@@ -1642,6 +1669,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_list_alpha < target) g_list_alpha = fmin(target, g_list_alpha + speed);
         else if (g_list_alpha > target) g_list_alpha = fmax(target, g_list_alpha - speed);
 
+        if (g_breath_period > 1.0)
+            g_breath_phase = fmod(g_breath_phase + dt * 6.283185307179586 / g_breath_period,
+                                  6.283185307179586);
+
         update_title();
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
@@ -1888,6 +1919,12 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) want_help = 1;
         if (!strcmp(argv[i], "--window")) g_fullscreen = 0;
         if (!strcmp(argv[i], "--mute")) g_mute = 1;
+        if (!strcmp(argv[i], "--breath-phase") && i + 1 < argc)
+            g_breath_phase = atof(argv[++i]);
+        if (!strcmp(argv[i], "--breath-period") && i + 1 < argc) {
+            double v = atof(argv[++i]);
+            if (v > 2.0) g_breath_period = v;
+        }
         if (!strcmp(argv[i], "--font-check")) {
             GdiplusStartupInput gi2;
             memset(&gi2, 0, sizeof gi2);
