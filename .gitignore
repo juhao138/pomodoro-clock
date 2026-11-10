@@ -16,3 +16,8 @@ Thumbs.db
 .DS_Store
 __pycache__/
 *.pyc
+
+# macOS 版构建产物
+dist/
+.build/
+.shots/

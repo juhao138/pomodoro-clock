@@ -1,8 +1,21 @@
 # 桌面时钟番茄钟
 
-Windows 原生桌面时钟 + 番茄钟 + 待办清单。全屏覆盖，单文件 300 KB，不依赖任何运行库。
+桌面时钟 + 番茄钟 + 待办清单，两个平台：
+
+| 平台 | 实现 | 位置 |
+|---|---|---|
+| Windows | Win32 + GDI+，单文件 300 KB，不依赖任何运行库 | 本目录 |
+| macOS | Swift + AppKit + Core Graphics 原生应用，界面按终末地风格重制 | [macos/](macos/README.md) |
 
 ![主界面](docs/screenshots/main.png)
+
+> **macOS 版**（Swift，无 Electron）：同一套番茄钟 / 待办 / 设置，界面重画成「纸面 + 一个强调色 + 切角」的控制台。
+>
+> | 浅色 | 深色 |
+> |---|---|
+> | ![](docs/screenshots-macos/home-light.png) | ![](docs/screenshots-macos/home-dark.png) |
+>
+> 使用说明见 [macos/README.md](macos/README.md)。
 
 ## 功能
 
@@ -26,7 +39,7 @@ Windows 原生桌面时钟 + 番茄钟 + 待办清单。全屏覆盖，单文件
 
 ![设置窗口](docs/screenshots/settings.png)
 
-## 快速开始
+## 快速开始（Windows）
 
 双击 `桌面时钟番茄钟.exe`，Esc 退出。
 
@@ -87,7 +100,7 @@ bg_image=D:\wallpaper.jpg
 1	回复客户的邮件
 ```
 
-## 自己编译
+## 自己编译（Windows）
 
 只需要 [Zig](https://ziglang.org/download/)（单文件编译器，免安装）：
 
@@ -127,7 +140,9 @@ pomodoro_clock.c            全部源码（约 2400 行，单文件）
 _build/make_clock_icon.py   用 Pillow 画图标
 _build/make_res.py          把 .ico 打包成 .res 资源
 docs/使用说明.txt            面向使用者的中文说明
-docs/screenshots/           截图
+docs/screenshots/           截图（Windows）
+docs/screenshots-macos/     截图（macOS）
+macos/                      macOS 版源码与说明
 ```
 
 ## 已知限制
