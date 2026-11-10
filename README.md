@@ -4,7 +4,7 @@
 
 | 平台 | 版本 | 实现 | 怎么装 |
 |---|---|---|---|
-| Windows | 1.6.0 | Win32 + GDI+，单文件 300 KB，不依赖任何运行库 | 双击 `.exe` |
+| Windows | 1.6.0 | Win32 + GDI+，单文件 300 KB，不依赖任何运行库 | [下载 exe](https://github.com/juhao138/pomodoro-clock/releases/tag/v1.6.0) |
 | **macOS** | **1.0** | Swift + AppKit + Core Graphics 原生应用，通用二进制 | [下载 dmg](https://github.com/juhao138/pomodoro-clock/releases/latest) |
 
 ![主界面](docs/screenshots/main.png)
