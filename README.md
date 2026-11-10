@@ -18,7 +18,7 @@
 |---|---|
 | ![](docs/screenshots-macos/home-light.png) | ![](docs/screenshots-macos/home-dark.png) |
 
-- **安装** — 下载 `桌面番茄钟-1.0.dmg`，双击挂载，把 app 拖进「应用程序」。想自己打：`cd macos && ./package.sh`
+- **安装** — `cd macos && ./package.sh` 打出 `桌面番茄钟-1.0.dmg`，双击挂载，把 app 拖进「应用程序」（也可以直接用编译好的 `dist/桌面番茄钟.app`）
 - **通用二进制** — x86_64 + arm64，Intel 与 Apple Silicon 都能跑，要求 macOS 12 以上
 - **和 Windows 版一致** — 番茄钟状态机（含超时结转、每 4 个专注进长休）、`todo.txt` 格式、命令行参数、`--selftest`
 - **macOS 版多出来的** — 深色主题、↑↓ 选待办、滚轮翻页、跟随系统「减弱动态效果」
