@@ -46,6 +46,9 @@ macOS 版新加的：
 
 ## 运行
 
+从 [Releases](https://github.com/juhao138/pomodoro-clock/releases/latest) 下载 `PomodoroClock-1.0-macOS.dmg`，
+双击挂载后把「桌面番茄钟」拖进「应用程序」即可。自己编译的话：
+
 ```bash
 open dist/桌面番茄钟.app          # 或双击
 ```

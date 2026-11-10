@@ -5,7 +5,7 @@
 | 平台 | 版本 | 实现 | 怎么装 |
 |---|---|---|---|
 | Windows | 1.0 | Win32 + GDI+，单文件 300 KB，不依赖任何运行库 | 双击 `.exe` |
-| **macOS** | **1.0** | Swift + AppKit + Core Graphics 原生应用，通用二进制 | 拖进「应用程序」 |
+| **macOS** | **1.0** | Swift + AppKit + Core Graphics 原生应用，通用二进制 | [下载 dmg](https://github.com/juhao138/pomodoro-clock/releases/latest) |
 
 ![主界面](docs/screenshots/main.png)
 
@@ -18,7 +18,7 @@
 |---|---|
 | ![](docs/screenshots-macos/home-light.png) | ![](docs/screenshots-macos/home-dark.png) |
 
-- **安装** — `cd macos && ./package.sh` 打出 `桌面番茄钟-1.0.dmg`，双击挂载，把 app 拖进「应用程序」（也可以直接用编译好的 `dist/桌面番茄钟.app`）
+- **安装** — 从 [Releases](https://github.com/juhao138/pomodoro-clock/releases/latest) 下载 `PomodoroClock-1.0-macOS.dmg`，双击挂载，把「桌面番茄钟」拖进「应用程序」；也可以 `cd macos && ./package.sh` 自己打一个
 - **通用二进制** — x86_64 + arm64，Intel 与 Apple Silicon 都能跑，要求 macOS 12 以上
 - **和 Windows 版一致** — 番茄钟状态机（含超时结转、每 4 个专注进长休）、`todo.txt` 格式、命令行参数、`--selftest`
 - **macOS 版多出来的** — 深色主题、↑↓ 选待办、滚轮翻页、跟随系统「减弱动态效果」
