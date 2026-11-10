@@ -1,4 +1,6 @@
-# 桌面番茄钟 · macOS 版
+# 桌面番茄钟 · macOS 版 1.0
+
+> 版本 1.0 · 通用二进制（x86_64 + arm64）· 要求 macOS 12 以上
 
 Windows 版是 Win32 + GDI+ 的单文件程序。macOS 没有这两样东西，所以这一版重写为
 **Swift + AppKit + Core Graphics 的原生应用**：窗口、文字、圆盘、切角、命中区域全部自绘，

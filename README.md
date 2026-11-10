@@ -1,23 +1,30 @@
 # 桌面时钟番茄钟
 
-桌面时钟 + 番茄钟 + 待办清单，两个平台：
+桌面时钟 + 番茄钟 + 待办清单，Windows 和 macOS 两版。
 
-| 平台 | 实现 | 位置 |
-|---|---|---|
-| Windows | Win32 + GDI+，单文件 300 KB，不依赖任何运行库 | 本目录 |
-| macOS | Swift + AppKit + Core Graphics 原生应用，界面按终末地风格重制 | [macos/](macos/README.md) |
+| 平台 | 版本 | 实现 | 怎么装 |
+|---|---|---|---|
+| Windows | 1.0 | Win32 + GDI+，单文件 300 KB，不依赖任何运行库 | 双击 `.exe` |
+| **macOS** | **1.0** | Swift + AppKit + Core Graphics 原生应用，通用二进制 | 拖进「应用程序」 |
 
 ![主界面](docs/screenshots/main.png)
 
-> **macOS 版**（Swift，无 Electron）：同一套番茄钟 / 待办 / 设置，界面重画成「纸面 + 一个强调色 + 切角」的控制台。
->
-> | 浅色 | 深色 |
-> |---|---|
-> | ![](docs/screenshots-macos/home-light.png) | ![](docs/screenshots-macos/home-dark.png) |
->
-> 使用说明见 [macos/README.md](macos/README.md)。安装包：`dist/桌面番茄钟-1.0.dmg`（通用二进制，Intel / Apple Silicon 都能跑）。
+## macOS 版 1.0
 
-## 功能
+同一套番茄钟 / 待办 / 设置，用 Swift + AppKit 重写成原生应用——不套 Electron、不用 WebView，
+窗口、圆盘、切角、命中区域全部自绘。界面按「终末地风味」重制：纸面、一个强调色、切角表示可按、细线分区。
+
+| 浅色 | 深色 |
+|---|---|
+| ![](docs/screenshots-macos/home-light.png) | ![](docs/screenshots-macos/home-dark.png) |
+
+- **安装** — 下载 `桌面番茄钟-1.0.dmg`，双击挂载，把 app 拖进「应用程序」。想自己打：`cd macos && ./package.sh`
+- **通用二进制** — x86_64 + arm64，Intel 与 Apple Silicon 都能跑，要求 macOS 12 以上
+- **和 Windows 版一致** — 番茄钟状态机（含超时结转、每 4 个专注进长休）、`todo.txt` 格式、命令行参数、`--selftest`
+- **macOS 版多出来的** — 深色主题、↑↓ 选待办、滚轮翻页、跟随系统「减弱动态效果」
+- 完整说明见 [macos/README.md](macos/README.md)
+
+## 功能（Windows 版）
 
 - **时钟是主角** — 雅黑粗体超大字号，每秒刷新，左侧对齐，一眼看清几点
 - **番茄钟** — 专注 25 / 短休 5 / 长休 15，每 4 个专注自动进长休，阶段自动衔接
@@ -29,7 +36,7 @@
 - **柔和提示音** — 程序内合成的风铃音（E5-G5-C6 琶音），不依赖音频文件
 - **低占用** — 前台 CPU 约 4%，内存 32 MB；窗口不在前台时自动降到约 2fps
 
-## 截图
+## 截图（Windows 版）
 
 | 默认渐变背景 | 自定义背景图 |
 |---|---|
@@ -142,7 +149,7 @@ _build/make_res.py          把 .ico 打包成 .res 资源
 docs/使用说明.txt            面向使用者的中文说明
 docs/screenshots/           截图（Windows）
 docs/screenshots-macos/     截图（macOS）
-macos/                      macOS 版源码与说明
+macos/                      macOS 版源码与说明（./build.sh 编译，./package.sh 打 dmg）
 ```
 
 ## 已知限制
