@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import Foundation
 
 enum HomeHit: Equatable {
     case none

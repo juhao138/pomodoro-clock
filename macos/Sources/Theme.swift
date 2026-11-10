@@ -10,6 +10,7 @@
 //
 
 import AppKit
+import Foundation
 
 enum ThemeKind: Int {
     case light = 0

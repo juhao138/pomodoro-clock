@@ -15,7 +15,7 @@
 > |---|---|
 > | ![](docs/screenshots-macos/home-light.png) | ![](docs/screenshots-macos/home-dark.png) |
 >
-> 使用说明见 [macos/README.md](macos/README.md)。
+> 使用说明见 [macos/README.md](macos/README.md)。安装包：`dist/桌面番茄钟-1.0.dmg`（通用二进制，Intel / Apple Silicon 都能跑）。
 
 ## 功能
 

@@ -98,7 +98,15 @@ open dist/桌面番茄钟.app          # 或双击
 
 ```bash
 cd macos
-./build.sh        # 编译 + 组装 dist/桌面番茄钟.app + 本地签名
+./build.sh        # 编译通用二进制（x86_64 + arm64）+ 组装 dist/桌面番茄钟.app + 本地签名
+./package.sh      # 再打一个 dist/桌面番茄钟-1.0.dmg（内含「应用程序」替身）
+```
+
+产物：
+
+```
+dist/桌面番茄钟.app          双击即可运行
+dist/桌面番茄钟-1.0.dmg      拷到别的机器，拖进「应用程序」安装
 ```
 
 图标由 `macos/scripts/make_icon.py` 生成（需要 Pillow），产物 `macos/Resources/AppIcon.icns` 已经提交，

@@ -3,6 +3,7 @@
 //
 
 import AppKit
+import Foundation
 import AVFoundation
 
 // MARK: - 番茄钟

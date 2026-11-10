@@ -3,6 +3,7 @@
 //
 
 import AppKit
+import Foundation
 
 func parseOptions() -> Options {
     var o = Options()

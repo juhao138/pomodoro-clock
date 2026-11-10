@@ -3,6 +3,7 @@
 //
 
 import AppKit
+import Foundation
 
 enum Corner {
     case tl, tr, br, bl

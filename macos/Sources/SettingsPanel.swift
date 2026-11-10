@@ -3,6 +3,7 @@
 //
 
 import AppKit
+import Foundation
 
 enum PanelHit: Equatable {
     case none
