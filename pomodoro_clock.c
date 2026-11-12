@@ -40,6 +40,8 @@
 #define C_SELECT     0x1E2942
 
 static int argb(unsigned rgb, int a) { return (int)(((unsigned)a << 24) | rgb); }
+static void palette_set(int dark);
+static int g_dark;
 
 /* ------------------------------------------------------------------ 番茄钟 */
 
@@ -61,6 +63,14 @@ static const wchar_t *phase_name_w(Phase p) {
     case PHASE_WORK:  return L"专 注";
     case PHASE_SHORT: return L"短 休 息";
     default:          return L"长 休 息";
+    }
+}
+
+static const wchar_t *phase_name_plain(Phase p) {
+    switch (p) {
+    case PHASE_WORK:  return L"专注";
+    case PHASE_SHORT: return L"短休息";
+    default:          return L"长休息";
     }
 }
 
@@ -312,12 +322,14 @@ static void *g_bits;
 static int g_buf_w, g_buf_h;
 
 typedef struct { int size; int kind; GpFont *font; } FontSlot;
-#define FONT_CACHE 24
+#define FONT_CACHE 64
 static FontSlot g_fonts[FONT_CACHE];
 static int g_nfonts = 0;
 
 #define FONT_DISPLAY 0
 #define FONT_UI      1
+#define FONT_UI_BOLD 2
+#define FONT_LATIN   3
 
 /* ------------------------------------------------------------------ 提示音 */
 
@@ -448,9 +460,11 @@ static void stroke_round(GpGraphics *g, int argb_color, float x, float y,
 
 static GpFontFamily *g_family_ui = NULL;
 static GpFontFamily *g_family_display = NULL;
+static GpFontFamily *g_family_latin = NULL;
 static int g_display_needs_bold = 0;
 static wchar_t g_face_ui[LF_FACESIZE] = L"Microsoft YaHei UI";
 static wchar_t g_face_display[LF_FACESIZE] = L"Segoe UI Semibold";
+static wchar_t g_face_latin_used[LF_FACESIZE] = L"";
 static wchar_t g_face_ui_used[LF_FACESIZE] = L"";
 static wchar_t g_face_display_used[LF_FACESIZE] = L"";
 
@@ -481,6 +495,12 @@ static void resolve_families(void) {
         L"Segoe UI Semibold", L"Segoe UI"
     };
 
+    static const wchar_t *latin_names[] = {
+        L"Bahnschrift", L"Bahnschrift SemiBold", L"Segoe UI Semibold", L"Segoe UI"
+    };
+    g_family_latin = try_family(latin_names,
+                                (int)(sizeof latin_names / sizeof latin_names[0]),
+                                g_face_latin_used);
     g_family_ui = try_family(ui_names, (int)(sizeof ui_names / sizeof ui_names[0]), g_face_ui_used);
     g_family_display = try_family(display_names,
                                   (int)(sizeof display_names / sizeof display_names[0]),
@@ -513,13 +533,41 @@ static GpFont *font_get(int size_px, int kind) {
         if (g_fonts[i].size == size_px && g_fonts[i].kind == kind)
             return g_fonts[i].font;
 
-    GpFontFamily *family = (kind == FONT_DISPLAY) ? g_family_display : g_family_ui;
-    if (!family) family = g_family_ui;
+    GpFontFamily *family = g_family_ui;
     INT style = FontStyleRegular;
-    if (kind == FONT_DISPLAY && g_display_needs_bold) style = FontStyleBold;
+    switch (kind) {
+    case FONT_DISPLAY:
+        family = g_family_latin ? g_family_latin : g_family_display;
+        style = FontStyleBold;
+        break;
+    case FONT_UI_BOLD:
+        family = g_family_ui;
+        style = FontStyleBold;
+        break;
+    case FONT_LATIN:
+        family = g_family_latin ? g_family_latin : g_family_ui;
+        break;
+    default:
+        family = g_family_ui;
+        break;
+    }
+    if (!family) family = g_family_ui;
 
     GpFont *font = NULL;
-    GdipCreateFont(family, (REAL)size_px, style, UnitPixel, &font);
+    if (kind == FONT_DISPLAY && g_face_latin_used[0]) {
+        LOGFONTW lf;
+        memset(&lf, 0, sizeof lf);
+        lf.lfHeight = -size_px;
+        lf.lfWeight = FW_BOLD;
+        lf.lfCharSet = DEFAULT_CHARSET;
+        lf.lfQuality = ANTIALIASED_QUALITY;
+        wcsncpy(lf.lfFaceName, g_face_latin_used, LF_FACESIZE - 1);
+        GdipCreateFontFromLogfontW(NULL, &lf, &font);
+        if (font) {
+            /* GDI+ 拿不到字重时再退回构造字体 */
+        }
+    }
+    if (!font) GdipCreateFont(family, (REAL)size_px, style, UnitPixel, &font);
     if (font && g_nfonts < FONT_CACHE) {
         g_fonts[g_nfonts].size = size_px;
         g_fonts[g_nfonts].kind = kind;
@@ -635,6 +683,9 @@ static void settings_load(void) {
             wcsncpy(g_bg_image, line + 9, MAX_PATH - 1);
             g_bg_image[MAX_PATH - 1] = 0;
         }
+        if (!wcsncmp(line, L"theme=", 6)) {
+            palette_set(!wcscmp(line + 6, L"dark"));
+        }
     }
     fclose(f);
 }
@@ -644,6 +695,7 @@ static void settings_save(void) {
     FILE *f = _wfopen(g_settings_path, L"w, ccs=UTF-8");
     if (!f) return;
     fwprintf(f, L"bg_image=%ls\n", g_bg_image);
+    fwprintf(f, L"theme=%ls\n", g_dark ? L"dark" : L"light");
     fclose(f);
 }
 
@@ -855,23 +907,6 @@ static void fmt_seconds(double sec, wchar_t *out, int cap) {
     swprintf(out, (size_t)cap, L"%02d:%02d", m, s);
 }
 
-typedef struct { float x, y, w, h; } Box;
-
-/* ---------------- Google 风两栏：时钟靠左，待办靠右 ---------------- */
-
-static float kk(int h)         { return (float)(h / 1080.0); }
-static float margin_l(int w)   { return (float)(w * 0.072); }
-static float todo_x0(int w)    { return (float)(w * 0.615); }
-static float todo_x1(int w)    { return (float)(w * 0.925); }
-static float list_top_y(int h) { return (float)(h * 0.225); }
-static float list_row_h(int h) { return kk(h) * 50.0f; }
-
-static int list_visible_rows(int h) {
-    float avail = (float)(h * 0.80) - list_top_y(h);
-    int rows = (int)(avail / list_row_h(h));
-    return rows < 1 ? 1 : rows;
-}
-
 /* ---------------- 底部可点按钮 ---------------- */
 
 enum { UI_RUN = 0, UI_RESET, UI_SKIP, UI_LIST, UI_EDIT, UI_QUIT, UI_COUNT };
@@ -880,16 +915,378 @@ typedef struct {
     int id;
     wchar_t label[24];
     float x, y, w, h;
-    int primary;      /* 1 = 强调色实心 */
+    int primary;
 } UiButton;
 
 static UiButton g_ui[UI_COUNT];
+static int g_scroll = 0;
+static double g_btn_hover_t[UI_COUNT] = { 0 };
 static int g_ui_ready = 0;
 static int g_ui_hover = -1;
 static int g_ui_press = -1;
 static int g_ui_tracking = 0;
 
-/* 选择背景图片 */
+/* ---------------------------------------------------------------- 配色 */
+
+typedef struct {
+    unsigned paper, panel, ink, ink2, rule, chip, signal, onSignal, trace,
+             tagBg, tagFg, danger, cmdBar, cmdText, scrim;
+} Palette;
+
+static Palette g_pal;
+static int g_dark = 0;
+
+static void palette_set(int dark) {
+    g_dark = dark ? 1 : 0;
+    if (!g_dark) {
+        g_pal.paper = 0xF4F4F2; g_pal.panel = 0xFFFFFF; g_pal.ink = 0x161616;
+        g_pal.ink2  = 0x5C5C5C; g_pal.rule  = 0xD9D9D6; g_pal.chip = 0xE4E4E0;
+        g_pal.signal = 0xFFFA00; g_pal.onSignal = 0x161616; g_pal.trace = 0x161616;
+        g_pal.tagBg = 0x161616; g_pal.tagFg = 0xFFFFFF; g_pal.danger = 0xB3261E;
+        g_pal.cmdBar = 0x161616; g_pal.cmdText = 0xEDEDED; g_pal.scrim = 0x161616;
+    } else {
+        g_pal.paper = 0x191919; g_pal.panel = 0x222222; g_pal.ink = 0xEDEDED;
+        g_pal.ink2  = 0xA3A3A3; g_pal.rule  = 0x353535; g_pal.chip = 0x2E2E2E;
+        g_pal.signal = 0xFFFA00; g_pal.onSignal = 0x161616; g_pal.trace = 0xFFFA00;
+        g_pal.tagBg = 0x3A3A3A; g_pal.tagFg = 0xEDEDED; g_pal.danger = 0xFF8A7A;
+        g_pal.cmdBar = 0x161616; g_pal.cmdText = 0xEDEDED; g_pal.scrim = 0x000000;
+    }
+}
+
+/* ---------------------------------------------------------------- 形状 */
+
+typedef struct { float x, y, w, h; } Box;
+
+/* corner: 0=左上 1=右上 2=右下 3=左下 */
+static GpPath *cut_path(float x, float y, float w, float h, float cut, int corner) {
+    if (cut < 0) cut = 0;
+    if (cut > w / 2) cut = w / 2;
+    if (cut > h / 2) cut = h / 2;
+    GpPath *p = NULL;
+    if (GdipCreatePath(FillModeAlternate, &p) != Ok || !p) return NULL;
+    float x1 = x + w, y1 = y + h;
+    switch (corner) {
+    case 0:
+        GdipAddPathLine(p, x + cut, y, x1, y);
+        GdipAddPathLine(p, x1, y, x1, y1);
+        GdipAddPathLine(p, x1, y1, x, y1);
+        GdipAddPathLine(p, x, y1, x, y + cut);
+        break;
+    case 1:
+        GdipAddPathLine(p, x, y, x1 - cut, y);
+        GdipAddPathLine(p, x1 - cut, y, x1, y + cut);
+        GdipAddPathLine(p, x1, y + cut, x1, y1);
+        GdipAddPathLine(p, x1, y1, x, y1);
+        GdipAddPathLine(p, x, y1, x, y);
+        break;
+    case 2:
+        GdipAddPathLine(p, x, y, x1, y);
+        GdipAddPathLine(p, x1, y, x1, y1 - cut);
+        GdipAddPathLine(p, x1, y1 - cut, x1 - cut, y1);
+        GdipAddPathLine(p, x1 - cut, y1, x, y1);
+        GdipAddPathLine(p, x, y1, x, y);
+        break;
+    default:
+        GdipAddPathLine(p, x, y, x1, y);
+        GdipAddPathLine(p, x1, y, x1, y1);
+        GdipAddPathLine(p, x1, y1, x + cut, y1);
+        GdipAddPathLine(p, x + cut, y1, x, y1 - cut);
+        GdipAddPathLine(p, x, y1 - cut, x, y);
+        break;
+    }
+    GdipClosePathFigure(p);
+    return p;
+}
+
+static void box_fill(GpGraphics *g, unsigned rgb, int a, float x, float y, float w, float h) {
+    if (w <= 0 || h <= 0 || a <= 0) return;
+    GpSolidFill *b = brush_new(argb(rgb, a));
+    if (!b) return;
+    GdipFillRectangle(g, (GpBrush *)b, x, y, w, h);
+    GdipDeleteBrush((GpBrush *)b);
+}
+
+static void fill_cut(GpGraphics *g, unsigned rgb, int a, float x, float y, float w, float h,
+                     float cut, int corner) {
+    GpPath *p = cut_path(x, y, w, h, cut, corner);
+    if (!p) return;
+    GpSolidFill *b = brush_new(argb(rgb, a));
+    if (b) {
+        GdipFillPath(g, (GpBrush *)b, p);
+        GdipDeleteBrush((GpBrush *)b);
+    }
+    GdipDeletePath(p);
+}
+
+static void stroke_cut(GpGraphics *g, unsigned rgb, int a, float x, float y, float w, float h,
+                       float cut, int corner, float lw) {
+    GpPath *p = cut_path(x + lw * 0.5f, y + lw * 0.5f, w - lw, h - lw, cut, corner);
+    if (!p) return;
+    GpPen *pen = NULL;
+    GdipCreatePen1((ARGB)argb(rgb, a), lw, UnitPixel, &pen);
+    if (pen) {
+        GdipDrawPath(g, pen, p);
+        GdipDeletePen(pen);
+    }
+    GdipDeletePath(p);
+}
+
+static void h_line(GpGraphics *g, unsigned rgb, int a, float x0, float x1, float y, float lw) {
+    if (x1 <= x0) return;
+    box_fill(g, rgb, a, x0, floorf(y), x1 - x0, lw);
+}
+
+static void v_line(GpGraphics *g, unsigned rgb, int a, float x, float y0, float y1, float lw) {
+    if (y1 <= y0) return;
+    box_fill(g, rgb, a, floorf(x), y0, lw, y1 - y0);
+}
+
+/* 45° 斜线纹：空状态、画框影子 */
+static void hatch_box(GpGraphics *g, unsigned rgb, int a, float x, float y, float w, float h,
+                      float period, float lw) {
+    if (w <= 1 || h <= 2 || a <= 0) return;
+    GdipSetClipRect(g, x, y, w, h, CombineModeReplace);
+    GpPen *pen = NULL;
+    GdipCreatePen1((ARGB)argb(rgb, a), lw, UnitPixel, &pen);
+    if (pen) {
+        float step = period * 1.4142f;
+        for (float sx = x - h; sx < x + w + h; sx += step) {
+            GdipDrawLine(g, pen, sx, y + h, sx + h, y);
+        }
+        GdipDeletePen(pen);
+    }
+    GdipResetClip(g);
+}
+
+static void tri_strip(GpGraphics *g, float x, float y, float w, float h) {
+    float t = w / 3.0f;
+    box_fill(g, 0xFF00F0, 255, x, y, t, h);
+    box_fill(g, 0xFFFA00, 255, x + t, y, t, h);
+    box_fill(g, 0x00FFA2, 255, x + t * 2, y, w - t * 2, h);
+}
+
+/* ---------------------------------------------------------------- 文字 */
+
+static float text_w(GpGraphics *g, const wchar_t *s, GpFont *f) {
+    if (!s || !s[0]) return 0;
+    RectF layout = { 0, 0, 4000, 4000 }, bounds;
+    INT cps = 0, lines = 0;
+    if (GdipMeasureString(g, s, -1, f, &layout, NULL, &bounds, &cps, &lines) != Ok) return 0;
+    return bounds.Width;
+}
+
+/* 以「竖直中心」定位一行字 */
+static float text_cy(GpGraphics *g, const wchar_t *s, GpFont *f, unsigned rgb, int a,
+                     float x, float cy, float w, int align, int size) {
+    text_draw_a(g, s, f, rgb, a, x, cy - size * 0.62f, w, size * 1.24f, align);
+    return text_w(g, s, f);
+}
+
+/* 伪粗体：Bahnschrift 是可变字体，GDI+ 只拿默认字重；用路径描边补厚度 */
+static float text_cy_heavy(GpGraphics *g, const wchar_t *s, GpFont *f, unsigned rgb, int a,
+                           float x, float cy, float w, int align, int size) {
+    GpPath *path = NULL;
+    GpStringFormat *fmt = NULL;
+    RectF layout = { x, cy - size * 0.62f, w, size * 1.24f };
+    if (GdipCreatePath(FillModeWinding, &path) == Ok && path &&
+        GdipCreateStringFormat(0, LANG_NEUTRAL, &fmt) == Ok && fmt) {
+        GdipSetStringFormatAlign(fmt, (StringAlignment)align);
+        GdipSetStringFormatLineAlign(fmt, StringAlignmentCenter);
+        GdipSetStringFormatFlags(fmt, StringFormatFlagsNoWrap);
+        GpFontFamily *fam = g_family_latin ? g_family_latin : g_family_display;
+        if (fam && GdipAddPathString(path, s, -1, fam, FontStyleRegular, (REAL)size,
+                                     &layout, fmt) == Ok) {
+            GpSolidFill *b = brush_new(argb(rgb, a));
+            if (b) {
+                GdipFillPath(g, (GpBrush *)b, path);
+                GdipDeleteBrush((GpBrush *)b);
+            }
+            GpPen *pen = NULL;
+            if (GdipCreatePen1((ARGB)argb(rgb, a), (REAL)(size * 0.020f), UnitPixel, &pen) == Ok && pen) {
+                GdipSetPenLineJoin(pen, LineJoinRound);
+                GdipDrawPath(g, pen, path);
+                GdipDeletePen(pen);
+            }
+        }
+        if (fmt) GdipDeleteStringFormat(fmt);
+        GdipDeletePath(path);
+        return text_w(g, s, f);
+    }
+    if (fmt) GdipDeleteStringFormat(fmt);
+    if (path) GdipDeletePath(path);
+    return text_cy(g, s, f, rgb, a, x, cy, w, align, size);
+}
+
+/* 带字距的宽体小字：GDI+ 不带 tracking，逐字摆 */
+static void text_track(GpGraphics *g, const wchar_t *s, GpFont *f, unsigned rgb, int a,
+                       float x, float cy, float track, int size) {
+    float cx = x;
+    for (const wchar_t *p = s; *p; p++) {
+        wchar_t one[2] = { *p, 0 };
+        text_draw_a(g, one, f, rgb, a, cx, cy - size * 0.62f, (float)size * 4.0f,
+                    (float)size * 1.24f, 0);
+        float adv = text_w(g, one, f);
+        if (adv <= 0) adv = size * 0.45f;
+        cx += adv + track;
+    }
+}
+
+static float text_track_w(GpGraphics *g, const wchar_t *s, GpFont *f, float track) {
+    float w = 0;
+    for (const wchar_t *p = s; *p; p++) {
+        wchar_t one[2] = { *p, 0 };
+        float adv = text_w(g, one, f);
+        if (adv <= 0) adv = 6;
+        w += adv + track;
+    }
+    return w > 0 ? w - track : 0;
+}
+
+/* ---------------------------------------------------------------- 版式 */
+
+typedef struct {
+    float k, pad, w, h;
+    float contentY, contentH, contentBottom, contentW;
+    float eyebrowCy, titleCy, clockCy, clockSize, dateCy, ruleY;
+    float deckY, deckH, dialCx, dialCy, dialR, g2X, g3X;
+    float g2Cy, g3Cy;
+    Box board;
+    float headerH, rowH, footerH;
+    int rows, showG3;
+    float btnY, btnH;
+    Box btn[UI_COUNT];
+} Lay;
+
+static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+static void layout_compute(Lay *L, int w, int h) {
+    float k = clampf((float)h / 1080.0f, 0.60f, 1.45f);
+    L->k = k;
+    L->w = (float)w;
+    L->h = (float)h;
+    L->pad = floorf(48 * k + 0.5f);
+
+    float stripH = 3, barH = floorf(54 * k + 0.5f), bottomH = floorf(92 * k + 0.5f);
+    L->contentY = stripH + barH;
+    L->contentH = (float)h - bottomH - L->contentY;
+    L->contentBottom = (float)h - bottomH;
+    L->contentW = (float)w - L->pad * 2;
+
+    L->eyebrowCy = L->contentY + 50 * k;
+    L->titleCy = L->eyebrowCy + 40 * k;
+    L->clockSize = 300 * k;
+    if (L->clockSize > L->contentW / 4.60f) L->clockSize = L->contentW / 4.60f;
+    L->clockCy = L->titleCy + 30 * k + L->clockSize * 0.44f;
+    L->dateCy = L->clockCy + L->clockSize * 0.40f + 62 * k;
+    L->ruleY = L->dateCy + 30 * k;
+
+    L->deckY = L->ruleY;
+    L->deckH = L->contentBottom - L->ruleY;
+    L->dialR = 130 * k;
+    if (L->dialR > L->deckH * 0.30f) L->dialR = L->deckH * 0.30f;
+    if (L->dialR < 48) L->dialR = 48;
+    L->dialCx = L->pad + L->dialR;
+    L->dialCy = L->deckY + L->deckH * 0.5f;
+    L->g2X = L->pad + L->dialR * 2 + 60 * k;
+    L->g3X = L->g2X + 360 * k;
+    L->g2Cy = L->dialCy;
+    L->g3Cy = L->dialCy;
+
+    float boardW = L->contentW * 0.38f;
+    if (boardW < 340) boardW = 340;
+    if (boardW > 700 * k) boardW = 700 * k;
+    L->board.x = (float)w - L->pad - boardW;
+    L->board.y = L->deckY + 22 * k;
+    L->board.w = boardW;
+    L->board.h = L->contentBottom - L->board.y;
+    L->showG3 = ((L->board.x - L->g3X) > 250 * k);
+
+    L->headerH = 92 * k;
+    L->footerH = 46 * k;
+    int n = g_ntodos > 0 ? g_ntodos : 1;
+    float room = L->board.h - L->headerH - L->footerH;
+    int maxRows = (int)(room / (52 * k));
+    if (maxRows < 1) maxRows = 1;
+    L->rows = n < maxRows ? n : maxRows;
+    float rh = room / (float)L->rows;
+    if (rh < 52 * k) rh = 52 * k;
+    if (rh > 68 * k) rh = 68 * k;
+    L->rowH = rh;
+
+    L->btnH = floorf(42 * k + 0.5f);
+    L->btnY = L->contentBottom + 26 * k;
+    static const float widths[UI_COUNT] = { 132, 96, 96, 116, 96, 84 };
+    float x = L->pad;
+    for (int i = 0; i < UI_COUNT; i++) {
+        float bw = floorf(widths[i] * k + 0.5f);
+        L->btn[i].x = x;
+        L->btn[i].y = L->btnY;
+        L->btn[i].w = bw;
+        L->btn[i].h = L->btnH;
+        x += bw + (i == UI_RUN ? 20 * k : 14 * k);
+    }
+}
+
+static void btn_labels(void) {
+    wcscpy(g_ui[UI_RUN].label, g_pomo.running ? L"暂停" : L"开始");
+    wcscpy(g_ui[UI_RESET].label, L"重置");
+    wcscpy(g_ui[UI_SKIP].label, L"跳过");
+    wcscpy(g_ui[UI_LIST].label, g_list_pinned ? L"收起待办" : L"待办");
+    wcscpy(g_ui[UI_EDIT].label, L"设置");
+    wcscpy(g_ui[UI_QUIT].label, L"退出");
+}
+
+static void ui_layout(int w, int h) {
+    Lay L;
+    layout_compute(&L, w, h);
+    for (int i = 0; i < UI_COUNT; i++) {
+        g_ui[i].id = i;
+        g_ui[i].x = L.btn[i].x;
+        g_ui[i].y = L.btn[i].y;
+        g_ui[i].w = L.btn[i].w;
+        g_ui[i].h = L.btn[i].h;
+        g_ui[i].primary = (i == UI_RUN);
+    }
+    btn_labels();
+    g_ui_ready = 1;
+}
+
+static int ui_hit(int mx, int my) {
+    if (!g_ui_ready) return -1;
+    for (int i = 0; i < UI_COUNT; i++) {
+        if (mx >= g_ui[i].x && mx <= g_ui[i].x + g_ui[i].w &&
+            my >= g_ui[i].y && my <= g_ui[i].y + g_ui[i].h)
+            return i;
+    }
+    return -1;
+}
+
+static int g_row_press = -1;
+
+/* 点在待办看板的某一行上？返回条目下标，否则 -1 */
+static int hit_row(int mx, int my, int w, int h) {
+    if (g_list_alpha <= 0.5 || g_ntodos <= 0) return -1;
+    Lay L;
+    layout_compute(&L, w, h);
+    if (mx < L.board.x || mx > L.board.x + L.board.w) return -1;
+    float top = L.board.y + L.headerH;
+    if (my < top || my >= top + L.rows * L.rowH) return -1;
+    int r = (int)((my - top) / L.rowH);
+    int i = g_scroll + r;
+    return (i >= 0 && i < g_ntodos) ? i : -1;
+}
+
+/* 点在圆盘上？ */
+static int hit_dial(int mx, int my, int w, int h) {
+    Lay L;
+    layout_compute(&L, w, h);
+    float dx = mx - L.dialCx, dy = my - L.dialCy;
+    float rr = L.dialR * 1.22f;
+    return (dx * dx + dy * dy) <= rr * rr;
+}
+
+/* ---------------- 选择背景图 / 应用背景 / 待办常驻 ---------------- */
+
 static int pick_image(wchar_t *out, int cap) {
     OPENFILENAMEW ofn;
     memset(&ofn, 0, sizeof ofn);
@@ -924,465 +1321,562 @@ static void bg_apply(const wchar_t *path) {
     if (g_hwnd) InvalidateRect(g_hwnd, NULL, TRUE);
 }
 
-/* 切换待办的常驻状态；收起时立刻生效，不等当前轮播窗口走完 */
 static void list_toggle_pin(void) {
     g_list_pinned = !g_list_pinned;
     if (g_list_pinned) g_list_clock = 0;
-    else g_list_clock = (double)g_list_dur;   /* 让当前显示窗口立即过期 */
+    else g_list_clock = (double)g_list_dur;
 }
 
-/* 颜色混合：t=0 取 a，t=1 取 b */
-static unsigned mixc(unsigned a, unsigned b, double t) {
-    int r = (int)(((a >> 16) & 0xFF) * (1 - t) + ((b >> 16) & 0xFF) * t);
-    int g = (int)(((a >> 8) & 0xFF) * (1 - t) + ((b >> 8) & 0xFF) * t);
-    int bl = (int)((a & 0xFF) * (1 - t) + (b & 0xFF) * t);
-    if (r > 255) r = 255;
-    if (g > 255) g = 255;
-    if (bl > 255) bl = 255;
-    return ((unsigned)r << 16) | ((unsigned)g << 8) | (unsigned)bl;
+static unsigned shade(unsigned rgb, double f);
+
+static Phase pomo_next_phase(const Pomodoro *p) {
+    if (p->phase == PHASE_WORK)
+        return ((p->completed + 1) % p->long_every == 0) ? PHASE_LONG : PHASE_SHORT;
+    return PHASE_WORK;
 }
 
-static void ui_layout(int w, int h) {
-    float k = kk(h);
-    float bh = k * 42.0f;
-    float gap = k * 10.0f;
-    float y = h - k * 100.0f;
-    float x = margin_l(w);
-    static const float widths[UI_COUNT] = { 92, 76, 76, 96, 76, 76 };
+static int pomo_next_minutes(const Pomodoro *p) {
+    Phase n = pomo_next_phase(p);
+    if (n == PHASE_WORK) return p->work_min;
+    if (n == PHASE_SHORT) return p->short_min;
+    return p->long_min;
+}
 
-    for (int i = 0; i < UI_COUNT; i++) {
-        g_ui[i].id = i;
-        g_ui[i].x = x;
-        g_ui[i].y = y;
-        g_ui[i].w = k * widths[i];
-        g_ui[i].h = bh;
-        g_ui[i].primary = (i == UI_RUN);
-        x += g_ui[i].w + (i == UI_RUN ? gap * 2.2f : gap);
+static int g_hover_row = -1;
+
+
+/* ---------------------------------------------------------------- 日期 */
+
+static const wchar_t *kWeekday[] = { L"星期日", L"星期一", L"星期二", L"星期三",
+                                     L"星期四", L"星期五", L"星期六" };
+
+static int day_of_week(int y, int m, int d) {
+    /* 0 = 周一 … 6 = 周日 */
+    if (m < 3) { y -= 1; m += 12; }
+    int c = y / 100, yy = y % 100;
+    int w = (yy + yy / 4 + c / 4 - 2 * c + 26 * (m + 1) / 10 + d - 1) % 7;
+    if (w < 0) w += 7;
+    return w;
+}
+
+static int iso_week(int y, int m, int d) {
+    static const int cum[] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+    int doy = cum[m - 1] + d;
+    int leap = (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0));
+    if (leap && m > 2) doy++;
+    int wd = day_of_week(y, 1, 1);
+    int week = (doy - 1 + wd) / 7 + 1;
+    if (week < 1) week = 1;
+    if (week > 53) week = 53;
+    return week;
+}
+
+static void utc_label(wchar_t *out, int cap) {
+    TIME_ZONE_INFORMATION tzi;
+    DWORD r = GetTimeZoneInformation(&tzi);
+    int bias = tzi.Bias;
+    if (r == TIME_ZONE_ID_DAYLIGHT) bias += tzi.DaylightBias;
+    else if (r == TIME_ZONE_ID_STANDARD) bias += tzi.StandardBias;
+    int off = -bias;                       /* 分钟，东八区 = +480 */
+    int hh = off / 60, mm = off % 60;
+    if (mm < 0) { mm = -mm; }
+    swprintf(out, (size_t)cap, L"UTC%+03d:%02d", hh, mm);
+}
+
+/* ---------------------------------------------------------------- 背景 */
+
+static void draw_wallpaper(GpGraphics *g, float w, float h) {
+    if (!g_bg_img) return;
+    UINT iw = 0, ih = 0;
+    GdipGetImageWidth(g_bg_img, &iw);
+    GdipGetImageHeight(g_bg_img, &ih);
+    if (!iw || !ih) return;
+    float sx = w / (float)iw, sy = h / (float)ih;
+    float sc = sx > sy ? sx : sy;
+    float dw = iw * sc, dh = ih * sc;
+    float dx = (w - dw) * 0.5f, dy = (h - dh) * 0.5f;
+
+    GpImageAttributes *ia = NULL;
+    if (GdipCreateImageAttributes(&ia) != Ok || !ia) return;
+    float a = g_dark ? 0.16f : 0.12f;
+    ColorMatrix cm;
+    memset(&cm, 0, sizeof cm);
+    REAL *cmv = (REAL *)&cm;          /* 5×5 连续存放，与结构体成员名无关 */
+    cmv[0] = 1; cmv[6] = 1; cmv[12] = 1; cmv[18] = a; cmv[24] = 1;
+    GdipSetImageAttributesColorMatrix(ia, ColorAdjustTypeBitmap, TRUE, &cm, NULL,
+                                      ColorMatrixFlagsDefault);
+    GdipDrawImageRectRect(g, g_bg_img, dx, dy, dw, dh, 0, 0,
+                          (REAL)iw, (REAL)ih, UnitPixel, ia, NULL, NULL);
+    GdipDisposeImageAttributes(ia);
+}
+
+static void draw_contours(GpGraphics *g, Lay *L) {
+    GpPen *pen = NULL;
+    GdipCreatePen1((ARGB)argb(g_pal.ink, g_dark ? 18 : 24), 1.0f, UnitPixel, &pen);
+    if (!pen) return;
+    float cx = L->w - L->pad + 26 * L->k;
+    float cy = L->contentY + 40 * L->k;
+    float radii[] = { 96, 138, 180, 222, 264 };
+    for (int i = 0; i < 5; i++) {
+        float r = radii[i] * L->k;
+        float a0 = (i < 3) ? 96.0f : 120.0f;
+        float a1 = (i < 3) ? 276.0f : 238.0f;
+        GdipDrawArc(g, pen, cx - r, cy - r, r * 2, r * 2, a0, a1 - a0);
     }
-    wcscpy(g_ui[UI_RUN].label, g_pomo.running ? L"暂停" : L"开始");
-    wcscpy(g_ui[UI_RESET].label, L"重置");
-    wcscpy(g_ui[UI_SKIP].label, L"跳过");
-    wcscpy(g_ui[UI_LIST].label, g_list_pinned ? L"收起待办" : L"待办");
-    wcscpy(g_ui[UI_EDIT].label, L"设置");
-    wcscpy(g_ui[UI_QUIT].label, L"退出");
-    (void)w;
-    g_ui_ready = 1;
+    GdipDeletePen(pen);
 }
 
-static int ui_hit(int mx, int my) {
-    if (!g_ui_ready) return -1;
-    for (int i = 0; i < UI_COUNT; i++) {
-        if (mx >= g_ui[i].x && mx <= g_ui[i].x + g_ui[i].w &&
-            my >= g_ui[i].y && my <= g_ui[i].y + g_ui[i].h)
-            return i;
+/* ---------------------------------------------------------------- 命令栏 */
+
+static void draw_command_bar(GpGraphics *g, Lay *L) {
+    float k = L->k;
+    float barH = 54 * k;
+    box_fill(g, g_pal.cmdBar, 255, 0, 3, L->w, barH);
+    if (g_dark) h_line(g, g_pal.rule, 150, 0, L->w, 3 + barH - 1, 1);
+    tri_strip(g, 0, 0, L->w, 3);
+
+    float mid = 3 + barH * 0.5f;
+    GpFont *fBrand = font_get((int)(15 * k), FONT_UI_BOLD);
+    GpFont *fEye = font_get((int)(11 * k), FONT_LATIN);
+    GpFont *fField = font_get((int)(13 * k), FONT_LATIN);
+
+    box_fill(g, g_pal.signal, 255, L->pad, mid - 4.5f * k, 9 * k, 9 * k);
+    float bx = L->pad + 18 * k;
+    float eyeW = text_track_w(g, L"// POMODORO", fEye, 11 * k * 0.14f);
+    text_track(g, L"// POMODORO", fEye, g_pal.cmdText, 150, bx, mid, 11 * k * 0.14f, (int)(11 * k));
+    text_cy(g, L"番茄钟", fBrand, g_pal.cmdText, 255, bx + eyeW + 14 * k, mid, 220 * k, 0, (int)(15 * k));
+
+    /* 中间：三段时长 */
+    wchar_t seg[3][32];
+    swprintf(seg[0], 32, L"专注 %d", g_pomo.work_min);
+    swprintf(seg[1], 32, L"短休 %d", g_pomo.short_min);
+    swprintf(seg[2], 32, L"长休 %d", g_pomo.long_min);
+    float total = 0;
+    for (int i = 0; i < 3; i++) {
+        total += text_w(g, seg[i], fBrand) + 18 * k;
+        if (i < 2) total += text_w(g, L"│", fField) + 18 * k;
     }
-    return -1;
-}
-
-/* 时钟位图缓存：184px 的大字用 GDI+ 每次重画要 10ms+，
-   而呼吸每秒要重绘好几次。缓存成 ARGB 位图后，其余帧直接 AlphaBlend。 */
-static GpBitmap *g_ck_bmp = NULL;
-static int g_ck_w = 0, g_ck_h = 0, g_ck_size = 0;
-static wchar_t g_ck_str[16] = { 0 };
-
-static GpBitmap *clock_cache(const wchar_t *s, GpFont *f, int size_px, RectF bounds) {
-    int wpx = (int)ceilf(bounds.Width) + 8;
-    int hpx = (int)ceilf(bounds.Height) + 8;
-    if (wpx < 8) wpx = 8;
-    if (hpx < 8) hpx = 8;
-
-    if (g_ck_bmp && g_ck_size == size_px && !wcscmp(g_ck_str, s)) return g_ck_bmp;
-
-    if (g_ck_bmp) { GdipDisposeImage((GpImage *)g_ck_bmp); g_ck_bmp = NULL; }
-    GpBitmap *bmp = NULL;
-    if (GdipCreateBitmapFromScan0(wpx, hpx, 0, PixelFormat32bppPARGB, NULL, &bmp) != Ok || !bmp)
-        return NULL;
-
-    GpGraphics *bg2 = NULL;
-    if (GdipGetImageGraphicsContext((GpImage *)bmp, &bg2) != Ok || !bg2) {
-        GdipDisposeImage((GpImage *)bmp);
-        return NULL;
+    float cx = (L->w - total) * 0.5f;
+    for (int i = 0; i < 3; i++) {
+        cx += text_cy(g, seg[i], fBrand, g_pal.cmdText, 160, cx, mid, 300, 0, (int)(13 * k)) + 18 * k;
+        if (i < 2) {
+            text_cy(g, L"│", fField, g_pal.cmdText, 45, cx, mid, 20, 0, (int)(13 * k));
+            cx += text_w(g, L"│", fField) + 18 * k;
+        }
     }
-    GdipSetTextRenderingHint(bg2, TextRenderingHintAntiAlias);
-    GdipSetSmoothingMode(bg2, SmoothingModeAntiAlias);
-    GdipSetCompositingMode(bg2, CompositingModeSourceCopy);
-    GpSolidFill *clr = NULL;
-    GdipCreateSolidFill(0, &clr);
-    if (clr) { GdipFillRectangle(bg2, (GpBrush *)clr, 0, 0, (REAL)wpx, (REAL)hpx);
-               GdipDeleteBrush((GpBrush *)clr); }
-    GdipSetCompositingMode(bg2, CompositingModeSourceOver);
 
-    text_draw_a(bg2, s, f, C_TEXT, 255, 4.0f, 0.0f,
-                (float)wpx - 8.0f, (REAL)hpx, 0);
-    GdipDeleteGraphics(bg2);
-
-    g_ck_bmp = bmp;
-    g_ck_w = wpx;
-    g_ck_h = hpx;
-    g_ck_size = size_px;
-    wcsncpy(g_ck_str, s, 15);
-    g_ck_str[15] = 0;
-    return bmp;
+    /* 右：第几组 + 状态 */
+    wchar_t st[64];
+    swprintf(st, 64, L"第 %d 组 / %d", g_pomo.completed % g_pomo.long_every + 1, g_pomo.long_every);
+    float rx = L->w - L->pad;
+    float w1 = text_w(g, g_pomo.running ? L"运行中" : L"已暂停", fBrand);
+    text_cy(g, g_pomo.running ? L"运行中" : L"已暂停", fBrand,
+            g_pomo.running ? g_pal.signal : g_pal.cmdText, g_pomo.running ? 255 : 150,
+            rx - w1, mid, 160, 0, (int)(13 * k));
+    if (g_pomo.running) box_fill(g, g_pal.signal, 255, rx - w1 - 13 * k, mid - 3.5f * k, 7 * k, 7 * k);
+    rx -= w1 + 21 * k;
+    float w2 = text_w(g, st, fBrand);
+    text_cy(g, st, fBrand, g_pal.cmdText, 150, rx - w2, mid, 200, 0, (int)(13 * k));
+    rx -= w2 + 18 * k;
+    text_cy(g, L"│", fField, g_pal.cmdText, 45, rx, mid, 20, 0, (int)(13 * k));
 }
 
-/* 左：时钟 + 番茄钟，全部贴左边距 */
-static void paint_clock_block(GpGraphics *g, int w, int h) {
-    float k = kk(h);
-    float x0 = margin_l(w);
-    RectF full = { 0, 0, (REAL)w, (REAL)h };
+/* ---------------------------------------------------------------- 时钟 */
 
+static void draw_clock_banner(GpGraphics *g, Lay *L) {
+    float k = L->k;
     SYSTEMTIME st;
     GetLocalTime(&st);
+
+    GpFont *fEye = font_get((int)(11 * k), FONT_LATIN);
+    GpFont *fTitle = font_get((int)(24 * k), FONT_UI_BOLD);
+    GpFont *fClock = font_get((int)L->clockSize, FONT_DISPLAY);
+    GpFont *fField = font_get((int)(15 * k), FONT_LATIN);
+    GpFont *fZh = font_get((int)(15 * k), FONT_UI);
+
+    float x0 = L->pad;
+    float track = 11 * k * 0.14f;
+    text_track(g, L"// LOCAL TIME", fEye, g_pal.ink2, 255, x0, L->eyebrowCy, track, (int)(11 * k));
+    text_cy(g, L"本地时间", fTitle, g_pal.ink, 255, x0, L->titleCy, 300 * k, 0, (int)(24 * k));
+
     wchar_t clock[32];
     swprintf(clock, 32, L"%02d:%02d:%02d", st.wHour, st.wMinute, st.wSecond);
+    text_cy_heavy(g, clock, fClock, g_pal.ink, 255, x0 - L->clockSize * 0.03f, L->clockCy,
+                  L->w, 0, (int)L->clockSize);
 
-    /* 时钟：左对齐，右边界不能压到待办栏 */
-    double cy = h * 0.243;
-    double size = h * 0.17;
-    double max_w = todo_x0(w) - x0 - w * 0.03;
-    GpFont *f = font_get((int)size, FONT_DISPLAY);
-    RectF bounds;
-    for (int guard = 0; guard < 24 && f; guard++) {
-        INT cw = 0, ch = 0;
-        GdipMeasureString(g, clock, -1, f, &full, NULL, &bounds, &cw, &ch);
-        if (bounds.Width <= max_w) break;
-        size *= 0.94;
-        f = font_get((int)size, FONT_DISPLAY);
+    /* 日期字段行 */
+    wchar_t date[32], wk[32], wkn[32], utc[32];
+    swprintf(date, 32, L"%04d.%02d.%02d", st.wYear, st.wMonth, st.wDay);
+    wcscpy(wk, kWeekday[st.wDayOfWeek % 7]);
+    swprintf(wkn, 32, L"W%d", iso_week(st.wYear, st.wMonth, st.wDay));
+    utc_label(utc, 32);
+
+    float cx = x0;
+    cx += text_cy(g, date, fField, g_pal.ink2, 255, cx, L->dateCy, 400, 0, (int)(15 * k)) + 14 * k;
+    text_cy(g, L"│", fField, g_pal.ink2, 90, cx, L->dateCy, 20, 0, (int)(15 * k));
+    cx += text_w(g, L"│", fField) + 14 * k;
+    cx += text_cy(g, wk, fZh, g_pal.ink2, 255, cx, L->dateCy, 200, 0, (int)(15 * k)) + 14 * k;
+    text_cy(g, L"│", fField, g_pal.ink2, 90, cx, L->dateCy, 20, 0, (int)(15 * k));
+    cx += text_w(g, L"│", fField) + 14 * k;
+    text_cy(g, wkn, fField, g_pal.ink2, 255, cx, L->dateCy, 200, 0, (int)(15 * k));
+
+    float uw = text_w(g, utc, fField);
+    text_cy(g, utc, fField, g_pal.ink2, 200, L->w - L->pad - uw, L->dateCy, 200, 0, (int)(15 * k));
+}
+
+/* ---------------------------------------------------------------- 仪表盘 */
+
+static void draw_deck(GpGraphics *g, Lay *L) {
+    float k = L->k;
+    float cx = L->dialCx, cy = L->dialCy, r = L->dialR;
+    float thick = 18 * k;
+    if (thick < 10) thick = 10;
+
+    /* 外框细线 */
+    GpPen *ring = NULL;
+    GdipCreatePen1((ARGB)argb(g_pal.rule, 255), 1.0f, UnitPixel, &ring);
+    if (ring) {
+        float rr = r + thick * 0.5f + 9 * k;
+        GdipDrawEllipse(g, ring, cx - rr, cy - rr, rr * 2, rr * 2);
+        GdipDeletePen(ring);
     }
-    {
-        GpBitmap *ck = clock_cache(clock, f, (int)size, bounds);
-        if (ck) {
-            GdipDrawImageRectI(g, (GpImage *)ck,
-                               (INT)(x0 - 4),
-                               (INT)(cy - g_ck_h * 0.5),
-                               g_ck_w, g_ck_h);
-        }
-    }
 
-    /* 日期 */
-    static const wchar_t *wd[] = { L"星期日", L"星期一", L"星期二", L"星期三",
-                                   L"星期四", L"星期五", L"星期六" };
-    wchar_t datestr[128];
-    swprintf(datestr, 128, L"%d 年 %d 月 %d 日   %s",
-             st.wYear, st.wMonth, st.wDay, wd[st.wDayOfWeek]);
-    GpFont *f_date = font_get((int)(k * 24), FONT_UI);
-    text_draw_a(g, datestr, f_date, C_MUTED, 255, x0, (float)(h * 0.362),
-                (float)(w - x0 * 2), (float)(k * 40), 0);
-
-    /* 番茄钟：环在左，时间在环右侧 */
-    double radius = k * 78.0;
-    double thick = fmax(3.0, k * 12);
-    double ring_cy = h * 0.612;
-    double ring_cx = x0 + radius;
-    unsigned accent = phase_color(g_pomo.phase);
-
-    arc_draw(g, (float)ring_cx, (float)ring_cy, (float)radius, (float)thick,
-             0, 360, argb(C_TRACK, 255), 0);
-
+    /* 60 格刻度环 */
     double frac = g_pomo.total > 0 ? g_pomo.remaining / g_pomo.total : 0;
-    if (frac < 0) frac = 0;
-    if (frac > 1) frac = 1;
-    if (frac > 0.0008) {
-        arc_draw(g, (float)ring_cx, (float)ring_cy, (float)radius, (float)thick,
-                 -90, (float)(360.0 * frac), argb(accent, 255), 1);
-        double rad = (-90 + 360.0 * frac) * 3.14159265358979 / 180.0;
-        dot_draw(g, (float)(ring_cx + cos(rad) * radius),
-                 (float)(ring_cy + sin(rad) * radius),
-                 (float)(thick * 0.55), argb(accent, 255));
+    double gone = 1.0 - frac;
+    int head = (int)(gone * 60.0);
+    if (head < 0) head = 0;
+    if (head > 59) head = 59;
+    for (int i = 0; i < 60; i++) {
+        unsigned col = (i < head) ? g_pal.ink : (i == head ? g_pal.signal : g_pal.chip);
+        GpPen *pen = NULL;
+        GdipCreatePen1((ARGB)argb(col, 255), thick, UnitPixel, &pen);
+        if (!pen) continue;
+        float a0 = -90.0f + i * 6.0f + 0.45f;
+        GdipDrawArc(g, pen, cx - r, cy - r, r * 2, r * 2, a0, 4.65f);
+        GdipDeletePen(pen);
     }
 
-    /* 环内：阶段名 */
-    GpFont *f_phase = font_get((int)(k * 16), FONT_UI);
-    text_draw_a(g, phase_name_w(g_pomo.phase), f_phase, accent, 255,
-                (float)(ring_cx - radius), (float)(ring_cy - k * 10),
-                (float)(radius * 2), (float)(k * 22), 1);
-
-    /* 环右：剩余时间（大）+ 状态（小） */
-    float tx = (float)(ring_cx + radius + k * 40);
+    /* 环内读数 */
+    GpFont *fPhase = font_get((int)(12.5f * k), FONT_UI_BOLD);
+    float tsz = 52 * k;
+    if (tsz > r * 0.42f) tsz = r * 0.42f;
+    GpFont *fTime = font_get((int)tsz, FONT_DISPLAY);
+    GpFont *fSmall = font_get((int)(11 * k), FONT_UI);
+    text_cy(g, phase_name_plain(g_pomo.phase), fPhase, g_pal.ink2, 255, cx - r, cy - r * 0.36f, r * 2, 1, (int)(12.5f * k));
     wchar_t remain[16];
     fmt_seconds(g_pomo.remaining, remain, 16);
-    GpFont *f_remain = font_get((int)(k * 74), FONT_DISPLAY);
-    text_draw_a(g, remain, f_remain, C_TEXT, 255, tx,
-                (float)(ring_cy - k * 50), (float)(w - tx), (float)(k * 74), 0);
+    text_cy_heavy(g, remain, fTime, g_pal.ink, 255, cx - r, cy + r * 0.17f, r * 2, 1, (int)tsz);
+    text_cy(g, g_pomo.running ? L"进行中" : L"已暂停", fSmall,
+            g_pomo.running ? g_pal.ink2 : shade(g_pal.ink2, 0.8f), 255,
+            cx - r, cy + r * 0.52f, r * 2, 1, (int)(11 * k));
 
-    GpFont *f_state = font_get((int)(k * 15), FONT_UI);
-    wchar_t state[64];
-    swprintf(state, 64, L"%s", g_pomo.running ? L"进行中" : L"已暂停");
-    text_draw_a(g, state, f_state, g_pomo.running ? accent : C_DIM, 225, tx,
-                (float)(ring_cy + k * 26), (float)(w - tx), (float)(k * 22), 0);
+    /* 竖线分组 */
+    float rt = cy - r * 0.82f, rb = cy + r * 0.82f;
+    v_line(g, g_pal.rule, 255, L->g2X - 30 * k, rt, rb, 1);
+    if (L->showG3) v_line(g, g_pal.rule, 255, L->g3X - 30 * k, rt, rb, 1);
 
-    /* 完成点：环下方 */
-    int group = g_pomo.completed % g_pomo.long_every;
-    if (g_pomo.phase == PHASE_WORK && g_pomo.completed > 0 && group == 0)
-        group = g_pomo.long_every;
-    double dot_r = fmax(2.5, k * 4.5);
-    double gap = dot_r * 4.2;
-    double dy = ring_cy + radius + k * 34;
+    GpFont *fEye = font_get((int)(11 * k), FONT_LATIN);
+    GpFont *fTitle = font_get((int)(22 * k), FONT_UI_BOLD);
+    GpFont *fField = font_get((int)(14 * k), FONT_LATIN);
+    GpFont *fZh13 = font_get((int)(13 * k), FONT_UI);
+    float track = 11 * k * 0.14f;
+
+    /* 本轮进度 */
+    text_track(g, L"// SESSIONS", fEye, g_pal.ink2, 255, L->g2X, cy - 44 * k, track, (int)(11 * k));
+    text_cy(g, L"本轮进度", fTitle, g_pal.ink, 255, L->g2X, cy - 10 * k, 300 * k, 0, (int)(22 * k));
+
+    int done = g_pomo.completed % g_pomo.long_every;
+    if (g_pomo.phase == PHASE_WORK && g_pomo.completed > 0 && done == 0) done = g_pomo.long_every;
+    float bw = 56 * k, bh = 14 * k, gap = 12 * k;
+    float by = cy + 14 * k;
     for (int i = 0; i < g_pomo.long_every; i++) {
-        double x = ring_cx - gap * (g_pomo.long_every - 1) / 2.0 + i * gap;
-        dot_draw(g, (float)x, (float)dy, (float)dot_r,
-                 i < group ? argb(accent, 255) : argb(C_TRACK, 255));
+        int active = (i == done && g_pomo.phase == PHASE_WORK);
+        unsigned col = (i < done) ? g_pal.ink : (active ? g_pal.signal : g_pal.chip);
+        box_fill(g, col, 255, L->g2X + i * (bw + gap), by, bw, bh);
+        if (active) stroke_cut(g, g_pal.ink, 255, L->g2X + i * (bw + gap), by, bw, bh, 0, 2, 1);
     }
-}
-
-/* 右：毛玻璃待办卡片 */
-typedef struct {
-    float x0, y0, x1, y1;
-    float pad, header, row_h;
-    int rows;
-} Card;
-
-static Card todo_card(int w, int h) {
-    float k = kk(h);
-    Card c;
-    c.pad = k * 26;
-    c.header = k * 40;
-    c.row_h = k * 46;
-    c.x1 = (float)(w * 0.945);
-    c.x0 = c.x1 - (float)(w * 0.345);
-    int maxr = (int)((h * 0.44) / c.row_h);
-    if (maxr < 1) maxr = 1;
-    int rows = g_ntodos > 0 ? g_ntodos : 1;
-    if (rows > maxr) rows = maxr;
-    c.rows = rows;
-    float ch = c.pad * 2 + c.header + rows * c.row_h;
-    c.y0 = (float)(h * 0.42) - ch / 2;
-    c.y1 = c.y0 + ch;
-    return c;
-}
-
-static void paint_todo_card(GpGraphics *g, int w, int h, int alpha) {
-    float k = kk(h);
-    Card c = todo_card(w, h);
-    float cw = c.x1 - c.x0;
-    float chh = c.y1 - c.y0;
-    float r = k * 20;
-
-    if (alpha <= 2) return;
-
-    /* 投影 */
-    GpPath *sp = round_rect_path(c.x0, c.y0 + k * 10, cw, chh, r);
-    if (sp) {
-        GpSolidFill *sb = brush_new(argb(0x05070E, (int)(alpha * 0.28)));
-        if (sb) {
-            GdipFillPath(g, (GpBrush *)sb, sp);
-            GdipDeleteBrush((GpBrush *)sb);
-        }
-        GdipDeletePath(sp);
-    }
-
-    /* 玻璃本体：圆角裁剪 + 白色竖向渐变 */
-    GpPath *pp = round_rect_path(c.x0, c.y0, cw, chh, r);
-    if (!pp) return;
-    if (GdipSetClipPath(g, pp, CombineModeReplace) == Ok) {
-        RectF rb = { c.x0, c.y0, cw, chh };
-        GpLineGradient *lg = NULL;
-        GdipCreateLineBrushFromRect(&rb,
-                                    (ARGB)argb(0xFFFFFF, (int)(alpha * 0.14)),
-                                    (ARGB)argb(0xFFFFFF, (int)(alpha * 0.04)),
-                                    LinearGradientModeVertical, WrapModeTileFlipXY, &lg);
-        if (lg) {
-            GdipFillRectangle(g, (GpBrush *)lg, c.x0, c.y0, cw, chh);
-            GdipDeleteBrush((GpBrush *)lg);
-        }
-        GdipResetClip(g);
-    }
-    GdipDeletePath(pp);
-
-    /* 边框 + 顶部亮线 */
-    stroke_round(g, argb(0xFFFFFF, (int)(alpha * 0.22)), c.x0, c.y0, cw, chh, r, 1.0f);
-    fill_round(g, argb(0xFFFFFF, (int)(alpha * 0.18)),
-               c.x0 + k * 22, c.y0 + 1.0f, cw - k * 44, 1.0f, 0.5f);
-
-    /* ---- 内容 ---- */
-    GpFont *f_head = font_get((int)(k * 15), FONT_UI);
-    GpFont *f_item = font_get((int)(k * 19), FONT_UI);
-    float pad = c.pad;
-    float hx = c.x0 + pad;
-    float hw = cw - pad * 2;
-    float hy = c.y0 + pad * 0.72f;
-
-    text_draw_a(g, L"待办清单", f_head, 0xEAF0FA, (int)(alpha * 0.85),
-                hx, hy, hw * 0.7f, k * 24, 0);
     wchar_t cnt[32];
-    swprintf(cnt, 32, L"%d / %d", todo_done_count(), g_ntodos);
-    text_draw_a(g, cnt, f_head, 0xEAF0FA, (int)(alpha * 0.55),
-                hx + hw * 0.7f, hy, hw * 0.3f, k * 24, 2);
+    swprintf(cnt, 32, L"%d / %d", done, g_pomo.long_every);
+    float fx = L->g2X;
+    fx += text_cy(g, cnt, fField, g_pal.ink2, 255, fx, by + bh + 28 * k, 100, 0, (int)(14 * k)) + 12 * k;
+    text_cy(g, L"│", fField, g_pal.ink2, 90, fx, by + bh + 28 * k, 20, 0, (int)(14 * k));
+    fx += text_w(g, L"│", fField) + 12 * k;
+    wchar_t per[32];
+    swprintf(per, 32, L"%d 分钟一组", g_pomo.work_min);
+    text_cy(g, per, fZh13, g_pal.ink2, 255, fx, by + bh + 28 * k, 200, 0, (int)(13 * k));
 
-    fill_round(g, argb(0xFFFFFF, (int)(alpha * 0.10)),
-               hx, c.y0 + pad * 0.72f + k * 30, hw, (float)fmax(1.0, k * 1.0), 0.5f);
+    if (!L->showG3) return;
 
-    if (g_ntodos == 0) {
-        text_draw_a(g, L"按 E 添加待办", f_item, 0xEAF0FA, (int)(alpha * 0.5),
-                    hx, c.y0 + pad + c.header, hw, c.row_h, 0);
-        return;
-    }
+    /* 下一次 */
+    text_track(g, L"// NEXT", fEye, g_pal.ink2, 255, L->g3X, cy - 44 * k, track, (int)(11 * k));
+    wchar_t nxt[64];
+    swprintf(nxt, 64, L"下次 %ls", phase_name_plain(pomo_next_phase(&g_pomo)));
+    text_cy(g, nxt, fTitle, g_pal.ink, 255, L->g3X, cy - 10 * k, 360 * k, 0, (int)(22 * k));
+    wchar_t mins[32];
+    swprintf(mins, 32, L"%d 分钟", pomo_next_minutes(&g_pomo));
+    text_cy(g, mins, fZh13, g_pal.ink2, 255, L->g3X, cy + 26 * k, 200, 0, (int)(13 * k));
+    wchar_t acc[64];
+    swprintf(acc, 64, L"已累计 %d 分钟", g_pomo.completed * g_pomo.work_min);
+    text_cy(g, acc, fZh13, g_pal.ink2, 220, L->g3X, cy + 54 * k, 300, 0, (int)(13 * k));
+}
 
-    int first = 0;
-    if (g_todo_sel >= c.rows) first = g_todo_sel - c.rows + 1;
-    float top = c.y0 + pad + c.header;
+/* ---------------------------------------------------------------- 待办看板 */
 
-    for (int rr = 0; rr < c.rows; rr++) {
-        int i = first + rr;
-        if (i >= g_ntodos) break;
-        float ry = top + rr * c.row_h;
-        float cb = k * 16.0f;
-        float cbx = hx;
-        float cby = ry + (c.row_h - cb) / 2.0f;
+static void board_row_box(Lay *L, int r, Box *out) {
+    out->x = L->board.x;
+    out->y = L->board.y + L->headerH + r * L->rowH;
+    out->w = L->board.w;
+    out->h = L->rowH;
+}
 
-        if (i == g_todo_sel && g_list_pinned) {
-            fill_round(g, argb(0xFFFFFF, (int)(alpha * 0.10)),
-                       hx - k * 10, ry + k * 2, hw + k * 20, c.row_h - k * 4, k * 9);
+static Box board_check_box(Lay *L, int r, float shift) {
+    Box row, cb;
+    board_row_box(L, r, &row);
+    cb.x = L->board.x + 24 * L->k + shift;
+    cb.y = row.y + row.h * 0.5f - 9 * L->k;
+    cb.w = 18 * L->k;
+    cb.h = 18 * L->k;
+    return cb;
+}
+
+static void draw_check(GpGraphics *g, Box b, int checked, int hot, float k) {
+    float cut = 5 * k;
+    if (checked) {
+        fill_cut(g, hot ? g_pal.ink : g_pal.tagBg, 255, b.x, b.y, b.w, b.h, cut, 2);
+        GpPen *pen = NULL;
+        GdipCreatePen1((ARGB)argb(g_dark ? g_pal.paper : g_pal.panel, 245), 2.2f * k, UnitPixel, &pen);
+        if (pen) {
+            GdipDrawLine(g, pen, b.x + b.w * 0.24f, b.y + b.h * 0.52f,
+                         b.x + b.w * 0.44f, b.y + b.h * 0.76f);
+            GdipDrawLine(g, pen, b.x + b.w * 0.44f, b.y + b.h * 0.76f,
+                         b.x + b.w * 0.78f, b.y + b.h * 0.26f);
+            GdipDeletePen(pen);
         }
+    } else {
+        stroke_cut(g, hot ? g_pal.ink : g_pal.ink, hot ? 255 : 128, b.x, b.y, b.w, b.h, cut, 2, 1);
+    }
+}
 
-        if (g_todos[i].done) {
-            fill_round(g, argb(C_BREAK, alpha), cbx, cby, cb, cb, k * 4);
-            GpPen *pen = NULL;
-            GdipCreatePen1((ARGB)argb(0x0B111C, alpha), (REAL)fmax(1.6, k * 2.0),
-                           UnitPixel, &pen);
-            if (pen) {
-                GdipDrawLine(g, pen, cbx + cb * 0.24f, cby + cb * 0.52f,
-                             cbx + cb * 0.44f, cby + cb * 0.72f);
-                GdipDrawLine(g, pen, cbx + cb * 0.44f, cby + cb * 0.72f,
-                             cbx + cb * 0.78f, cby + cb * 0.28f);
-                GdipDeletePen(pen);
+static void draw_tag(GpGraphics *g, Box b, const wchar_t *s, int current, float k) {
+    fill_cut(g, current ? g_pal.signal : g_pal.tagBg, 255, b.x, b.y, b.w, b.h, 7 * k, 2);
+    GpFont *f = font_get((int)(b.h * 0.56f), FONT_LATIN);
+    text_cy(g, s, f, current ? g_pal.onSignal : g_pal.tagFg, 255, b.x + 4 * k,
+            b.y + b.h * 0.5f, b.w - 8 * k, 1, (int)(b.h * 0.56f));
+}
+
+static void draw_board(GpGraphics *g, Lay *L) {
+    float k = L->k;
+    Box b = L->board;
+    float cut = 26 * k;
+
+    /* 画框影子：硬边斜线纹 */
+    hatch_box(g, g_pal.ink, g_dark ? 26 : 28, b.x + 9 * k, b.y + 9 * k, b.w, b.h, 7 * k, 1.5f * k);
+
+    fill_cut(g, g_pal.panel, 255, b.x, b.y, b.w, b.h, cut, 0);
+    stroke_cut(g, g_pal.ink, 255, b.x, b.y, b.w, b.h, cut, 0, 1);
+    box_fill(g, g_pal.ink, 255, b.x + cut, b.y, b.w * 0.38f, 5 * k);
+
+    float x0 = b.x + 26 * k, x1 = b.x + b.w - 24 * k;
+    GpFont *fEye = font_get((int)(11 * k), FONT_LATIN);
+    GpFont *fTitle = font_get((int)(22 * k), FONT_UI_BOLD);
+    GpFont *fCount = font_get((int)(15 * k), FONT_LATIN);
+    float track = 11 * k * 0.14f;
+
+    text_track(g, L"// TASKS", fEye, g_pal.ink2, 255, x0, b.y + 32 * k, track, (int)(11 * k));
+    text_cy(g, L"待办", fTitle, g_pal.ink, 255, x0, b.y + 62 * k, 200 * k, 0, (int)(22 * k));
+    wchar_t cnt[32];
+    swprintf(cnt, 32, L"%02d / %02d", todo_done_count(), g_ntodos);
+    text_cy(g, cnt, fCount, g_pal.ink2, 255, x1 - 160 * k, b.y + 62 * k, 160 * k, 2, (int)(15 * k));
+    h_line(g, g_pal.rule, 255, x0, x1, b.y + L->headerH - 14 * k, 1);
+
+    int live = (g_list_alpha > 0.02);
+    float top = b.y + L->headerH;
+
+    if (!live) {
+        /* 静默：斜线纹 + 提示 */
+        float boxH = 46 * k;
+        float boxY = b.y + b.h - L->footerH - 18 * k - boxH;
+        float bandY = top + 10 * k;
+        float bandH = boxY - 22 * k - bandY;
+        if (bandH < 30 * k) bandH = 30 * k;
+        hatch_box(g, g_pal.ink, g_dark ? 22 : 16, x0, bandY, x1 - x0, bandH, 7 * k, 1.5f * k);
+
+        box_fill(g, g_pal.panel, 255, x0, boxY, x1 - x0, boxH);
+        stroke_cut(g, g_pal.rule, 255, x0, boxY, x1 - x0, boxH, 0, 2, 1);
+        box_fill(g, g_pal.signal, 255, x0 + 14 * k, boxY + boxH * 0.5f - 7 * k, 3 * k, 14 * k);
+        GpFont *fHint = font_get((int)(13 * k), FONT_UI);
+        wchar_t msg[128];
+        if (g_ntodos == 0) wcscpy(msg, L"还没有待办。按 E 打开设置，写下第一条。");
+        else swprintf(msg, 128, L"待办每 %d 秒出现一次，按 L 常驻。", g_list_every);
+        text_cy(g, msg, fHint, g_pal.ink2, 255, x0 + 28 * k, boxY + boxH * 0.5f,
+                x1 - x0 - 40 * k, 0, (int)(13 * k));
+    } else {
+        int first = g_scroll;
+        if (first > g_ntodos - 1) first = 0;
+        for (int r = 0; r < L->rows; r++) {
+            int i = first + r;
+            if (i >= g_ntodos) break;
+            double p = (g_list_alpha - r * 0.055) / 0.62;
+            if (p < 0) p = 0;
+            if (p > 1) p = 1;
+            if (p <= 0.01) continue;
+            int a = (int)(p * 255 * (g_list_alpha > 1 ? 1 : g_list_alpha * 1.15));
+            if (a > 255) a = 255;
+
+            Box row;
+            board_row_box(L, r, &row);
+            int sel = (i == g_todo_sel) && g_list_pinned;
+            float shift = (sel ? 6 * k : 0) + (1 - (float)p) * 22 * k;
+
+            if (sel) box_fill(g, g_pal.trace, 255, b.x + 1, row.y + 1, 4 * k, row.h - 2);
+            else if (g_ui_hover == -1 && i == g_hover_row)
+                box_fill(g, g_pal.chip, 140, b.x + 12 * k, row.y + 3 * k, row.w - 24 * k, row.h - 6 * k);
+
+            Box cb = board_check_box(L, r, shift);
+            draw_check(g, cb, g_todos[i].done, 0, k);
+
+            Box tag;
+            tag.x = cb.x + cb.w + 14 * k;
+            tag.y = row.y + row.h * 0.5f - 9.5f * k;
+            tag.w = 32 * k;
+            tag.h = 19 * k;
+            wchar_t num[8];
+            swprintf(num, 8, L"%02d", i + 1);
+            draw_tag(g, tag, num, sel, k);
+
+            GpFont *fItem = font_get((int)(15 * k), FONT_UI);
+            float tx = tag.x + tag.w + 14 * k;
+            float tw = (b.x + b.w - 24 * k) - tx;
+            unsigned col = g_todos[i].done ? g_pal.ink2 : g_pal.ink;
+            text_cy(g, g_todos[i].text, fItem, col, g_todos[i].done ? 230 : 255,
+                    tx, row.y + row.h * 0.5f, tw, 0, (int)(15 * k));
+
+            if (g_todos[i].done) {
+                float wpx = text_w(g, g_todos[i].text, fItem);
+                if (wpx > tw) wpx = tw;
+                h_line(g, g_pal.ink2, 170, tx, tx + wpx, row.y + row.h * 0.5f, 1.2f * k);
             }
-        } else {
-            stroke_round(g, argb(0xFFFFFF, (int)(alpha * 0.42)), cbx, cby, cb, cb, k * 4,
-                         (float)fmax(1.2, k * 1.3));
-        }
 
-        float tx = cbx + cb + k * 13;
-        float tw = hx + hw - tx;
-        unsigned color = g_todos[i].done ? 0x8C97AC : 0xF4F7FC;
-        text_draw_a(g, g_todos[i].text, f_item, color, alpha, tx, ry, tw, c.row_h, 0);
-
-        if (g_todos[i].done) {
-            INT mw = 0, mh = 0;
-            RectF lay = { tx, ry, tw, c.row_h };
-            RectF got;
-            GdipMeasureString(g, g_todos[i].text, -1, f_item, &lay, NULL, &got, &mw, &mh);
-            GpPen *pen = NULL;
-            GdipCreatePen1((ARGB)argb(0x8C97AC, (int)(alpha * 0.8)), (REAL)fmax(1.0, k * 1.1),
-                           UnitPixel, &pen);
-            if (pen) {
-                float ly = got.Y + got.Height * 0.52f;
-                GdipDrawLine(g, pen, got.X, ly, got.X + got.Width, ly);
-                GdipDeletePen(pen);
-            }
+            if (i < g_ntodos - 1)
+                h_line(g, g_pal.rule, 255, b.x + 24 * k, b.x + b.w - 24 * k, row.y + row.h, 1);
         }
     }
 
-    if (g_ntodos > c.rows) {
-        GpFont *f_more = font_get((int)(k * 13), FONT_UI);
-        wchar_t more[64];
-        swprintf(more, 64, L"还有 %d 条 · E 打开编辑", g_ntodos - c.rows);
-        text_draw_a(g, more, f_more, 0xEAF0FA, (int)(alpha * 0.45),
-                    hx, c.y1 - pad * 0.55f, hw, k * 18, 0);
+    /* 页脚 */
+    GpFont *fFoot = font_get((int)(11.5f * k), FONT_UI);
+    float footCy = b.y + b.h - 18 * k;
+    int over = g_ntodos - L->rows;
+    if (over > 0) {
+        wchar_t s[64];
+        swprintf(s, 64, L"还有 %d 条  ·  滚轮翻页", over);
+        text_cy(g, s, fFoot, g_pal.ink2, 220, x0, footCy, 300 * k, 0, (int)(11.5f * k));
+        text_cy(g, L"E 打开编辑", fFoot, g_pal.ink2, 220, x1 - 200 * k, footCy, 200 * k, 2, (int)(11.5f * k));
+    } else {
+        wchar_t s[64];
+        if (g_ntodos == 0) wcscpy(s, L"还没有条目");
+        else swprintf(s, 64, L"共 %d 条", g_ntodos);
+        text_cy(g, s, fFoot, g_pal.ink2, 200, x0, footCy, 300 * k, 0, (int)(11.5f * k));
+        text_cy(g, L"E 打开设置", fFoot, g_pal.ink2, 200, x1 - 200 * k, footCy, 200 * k, 2, (int)(11.5f * k));
     }
+}
+
+/* ---------------------------------------------------------------- 动作条 */
+
+static void draw_button(GpGraphics *g, Lay *L, int i) {
+    float k = L->k;
+    Box b = L->btn[i];
+    int primary = (i == UI_RUN);
+    int toggled = (i == UI_LIST && g_list_pinned);
+    int press = (g_ui_press == i);
+    float hov = (float)g_btn_hover_t[i];
+    float cut = 8 * k;
+    float y = b.y + (press ? 1.0f : 0.0f);
+
+    if (primary) fill_cut(g, g_pal.ink, 255, b.x, y, b.w, b.h, cut, 2);
+    else if (toggled) fill_cut(g, g_pal.chip, 255, b.x, y, b.w, b.h, cut, 2);
+    else fill_cut(g, g_pal.panel, 255, b.x, y, b.w, b.h, cut, 2);
+
+    if (hov > 0.001f) {
+        GpPath *p = cut_path(b.x, y, b.w, b.h, cut, 2);
+        if (p && GdipSetClipPath(g, p, CombineModeReplace) == Ok) {
+            box_fill(g, g_pal.signal, 255, b.x, y, b.w * hov + 2, b.h);
+            GdipResetClip(g);
+        }
+        if (p) GdipDeletePath(p);
+    }
+
+    if (primary) stroke_cut(g, g_pal.ink, 255, b.x, y, b.w, b.h, cut, 2, 1);
+    else stroke_cut(g, g_pal.ink, toggled ? 255 : 140, b.x, y, b.w, b.h, cut, 2, 1);
+
+    unsigned col = (hov > 0.45f) ? g_pal.onSignal : (primary ? g_pal.paper : g_pal.ink);
+    GpFont *f = font_get((int)(15 * k), FONT_UI_BOLD);
+    text_cy(g, g_ui[i].label, f, col, 255, b.x, y + b.h * 0.5f, b.w, 1, (int)(15 * k));
+}
+
+static void draw_action_bar(GpGraphics *g, Lay *L) {
+    float k = L->k;
+    h_line(g, g_pal.rule, 255, 0, L->w, L->contentBottom, 1);
+    for (int i = 0; i < UI_COUNT; i++) draw_button(g, L, i);
+
+    if (L->w < 1400 * k) return;
+    GpFont *f = font_get((int)(12 * k), FONT_UI);
+    const wchar_t *hint = L"空格 开始   R 重置   N 跳过   L 待办   E 设置   T 透明度   D 深浅   F11 窗口";
+    float hw = text_w(g, hint, f);
+    text_cy(g, hint, f, g_pal.ink2, 220, L->w - L->pad - hw, L->btnY + L->btnH * 0.5f, hw, 0, (int)(12 * k));
+}
+
+/* ---------------------------------------------------------------- 离屏渲染 */
+
+static void paint_ui(GpGraphics *g, int w, int h);
+
+static int render_png(const wchar_t *path, int w, int h) {
+    GpBitmap *bmp = NULL;
+    if (GdipCreateBitmapFromScan0(w, h, 0, PixelFormat32bppPARGB, NULL, &bmp) != Ok || !bmp) return 0;
+    GpGraphics *g = NULL;
+    if (GdipGetImageGraphicsContext((GpImage *)bmp, &g) != Ok || !g) {
+        GdipDisposeImage((GpImage *)bmp);
+        return 0;
+    }
+    GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+    GdipSetTextRenderingHint(g, TextRenderingHintAntiAlias);
+    GdipSetInterpolationMode(g, InterpolationModeHighQualityBicubic);
+    GdipSetPixelOffsetMode(g, PixelOffsetModeHalf);
+
+    paint_ui(g, w, h);
+
+    GdipDeleteGraphics(g);
+    CLSID png;
+    CLSIDFromString(L"{557CF406-1A04-11D3-9A73-0000F81EF32E}", &png);
+    int ok = (GdipSaveImageToFile((GpImage *)bmp, path, &png, NULL) == Ok);
+    GdipDisposeImage((GpImage *)bmp);
+    return ok;
+}
+
+/* ---------------------------------------------------------------- 主绘制 */
+
+static void paint_ui(GpGraphics *g, int w, int h) {
+    Lay L;
+    layout_compute(&L, w, h);
+    btn_labels();
+
+    box_fill(g, g_pal.paper, 255, 0, 0, (float)w, (float)h);
+    draw_wallpaper(g, (float)w, (float)h);
+    draw_contours(g, &L);
+    draw_command_bar(g, &L);
+    draw_clock_banner(g, &L);
+    draw_deck(g, &L);
+    draw_board(g, &L);
+    draw_action_bar(g, &L);
 }
 
 static void paint(HDC target, int w, int h) {
     buffer_size(w, h);
     GpGraphics *g = g_gp;
     if (!g) return;
-
-    float k = kk(h);
-    if (k < 0.4f) k = 0.4f;
-    if (k > 3.0f) k = 3.0f;
-
-    render_background(w, h);
-
-    /* 呼吸：暗相 → 亮相交叉淡入。t 在 0..1 之间按正弦摆动，
-       亮的是极光本身（光晕 45% ↔ 145%），不是盖一层灰。 */
-    {
-        double t01 = 0.5 + 0.5 * sin(g_breath_phase);
-        int alpha = ((int)(t01 * 255.0)) & ~7;      /* 量化到 32 档，肉眼平滑 */
-        composite_bg(w, h, alpha);
-        if (g_bgc) {
-            int bw = (w + BG_DIV - 1) / BG_DIV, bh2 = (h + BG_DIV - 1) / BG_DIV;
-            SetStretchBltMode(g_memdc, COLORONCOLOR);
-            StretchBlt(g_memdc, 0, 0, w, h, g_bgc, 0, 0, bw, bh2, SRCCOPY);
-        }
-    }
-
-    RectF full = { 0, 0, (REAL)w, (REAL)h };
-
-    /* 左上角竖向强调条：替代原来的小圆点，给左上角一个视觉锚点，
-       同时和时钟/日期的左边缘对齐 */
-    {
-        float bar_x = margin_l(w);
-        float bar_w = (float)fmax(3.0, k * 4.0);
-        float bar_h = k * 30.0f;
-        fill_round(g, argb(phase_color(g_pomo.phase), 235),
-                   bar_x, (float)(h * 0.118), bar_w, bar_h, bar_w * 0.5f);
-    }
-
-    int a = (int)(g_list_alpha * 255);
-    if (a > 255) a = 255;
-    if (a < 0) a = 0;
-
-    paint_clock_block(g, w, h);
-    paint_todo_card(g, w, h, a);
-
-    /* 底部：一排可点的毛玻璃按钮 */
-    ui_layout(w, h);
-    {
-        unsigned accent = phase_color(g_pomo.phase);
-        GpFont *f_btn = font_get((int)(k * 16), FONT_UI);
-        for (int i = 0; i < UI_COUNT; i++) {
-            UiButton *b = &g_ui[i];
-            int hover = (g_ui_hover == i);
-            int press = (g_ui_press == i);
-            float bx = b->x, by = b->y + (press ? k * 1.0f : 0.0f);
-            float bw = b->w, bh = b->h;
-            float rad = bh * 0.5f;                     /* 药丸形 */
-
-            if (b->primary) {
-                /* 主按钮：阶段色竖向渐变（上亮下暗），像有光照 */
-                unsigned top_c = mixc(accent, 0xFFFFFF, hover ? 0.22 : 0.14);
-                unsigned bot_c = mixc(accent, 0x000000, press ? 0.22 : 0.10);
-                GpPath *pill = round_rect_path(bx, by, bw, bh, rad);
-                if (pill && GdipSetClipPath(g, pill, CombineModeReplace) == Ok) {
-                    RectF rb = { bx, by, bw, bh };
-                    GpLineGradient *grad = NULL;
-                    GdipCreateLineBrushFromRect(&rb,
-                                                (ARGB)argb(top_c, press ? 235 : 230),
-                                                (ARGB)argb(bot_c, press ? 235 : 230),
-                                                LinearGradientModeVertical,
-                                                WrapModeTileFlipXY, &grad);
-                    if (grad) {
-                        GdipFillRectangle(g, (GpBrush *)grad, bx, by, bw, bh);
-                        GdipDeleteBrush((GpBrush *)grad);
-                    }
-                    GdipResetClip(g);
-                }
-                if (pill) GdipDeletePath(pill);
-                stroke_round(g, argb(mixc(accent, 0xFFFFFF, 0.25), 200), bx, by, bw, bh, rad, 1.0f);
-                /* 顶部内高光 */
-                fill_round(g, argb(0xFFFFFF, 46), bx + rad * 0.55f, by + 1.0f,
-                           bw - rad * 1.1f, (float)fmax(1.0, k * 1.0), 0.5f);
-                text_draw_a(g, b->label, f_btn, 0xFFFFFF, 255, bx, by, bw, bh, 1);
-            } else {
-                /* 毛玻璃：白色低透明度 + 1px 描边 + 顶部内高光 */
-                fill_round(g, argb(0xFFFFFF, press ? 54 : hover ? 40 : 24), bx, by, bw, bh, rad);
-                stroke_round(g, argb(0xFFFFFF, hover ? 95 : 62), bx, by, bw, bh, rad, 1.0f);
-                fill_round(g, argb(0xFFFFFF, 26), bx + rad * 0.55f, by + 1.0f,
-                           bw - rad * 1.1f, (float)fmax(1.0, k * 1.0), 0.5f);
-                text_draw_a(g, b->label, f_btn, 0xF4F7FC, hover ? 255 : 228, bx, by, bw, bh, 1);
-            }
-        }
-
-        /* 按钮下方一行极简提示 */
-        GpFont *f_hint = font_get((int)(k * 13), FONT_UI);
-        text_draw_a(g, L"空格 开始/暂停   ·   E 设置   ·   F11 窗口   ·   Esc 退出", f_hint, C_DIM, 200,
-                    margin_l(w), (float)(h - k * 44), (float)(w - margin_l(w) * 2),
-                    (float)(k * 22), 0);
-    }
-
+    paint_ui(g, w, h);
     BitBlt(target, 0, 0, w, h, g_memdc, 0, 0, SRCCOPY);
 }
-
 /* ------------------------------------------------------------------ 编辑窗口 */
 
 enum {
@@ -1547,20 +2041,16 @@ static void ed_draw_button(const DRAWITEMSTRUCT *dis) {
     EBtn *e = ebtn_find(dis->hwndItem);
     int hover = e && e->hover && !disabled;
 
-    unsigned accent = phase_color(g_pomo.phase);
     unsigned fill, border, txt;
     if (primary) {
-        fill = disabled ? 0x3B4256 : pressed ? shade(accent, 0.82)
-             : hover ? shade(accent, 1.12) : accent;
-        border = fill;
-        txt = disabled ? 0x7A849A : 0x0B111C;
-        if (hover || pressed) txt = 0xFFFFFF;
-        txt = disabled ? 0x7A849A : 0xFFFFFF;
+        fill = g_pal.ink;
+        border = g_pal.ink;
+        txt = (hover || pressed) ? g_pal.onSignal : g_pal.paper;
+        if (hover || pressed) fill = g_pal.signal;
     } else {
-        fill = disabled ? 0x141B2A : pressed ? 0x27324A
-             : hover ? 0x1E2840 : 0x18202F;
-        border = disabled ? 0x232B3D : (hover ? shade(accent, 0.9) : 0x2C3752);
-        txt = disabled ? 0x5A6478 : 0xF4F7FC;
+        fill = pressed ? g_pal.chip : g_pal.panel;
+        border = hover ? g_pal.ink : 0x8A8A86;
+        txt = disabled ? 0x9A9A96 : g_pal.ink;
     }
 
     RECT rc = dis->rcItem;
@@ -1570,21 +2060,17 @@ static void ed_draw_button(const DRAWITEMSTRUCT *dis) {
     GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
     GdipSetTextRenderingHint(g, TextRenderingHintClearTypeGridFit);
 
-    /* 先铺和窗口一致的底色，圆角外才不会露出白边 */
-    fill_round(g, argb(0x121826, 255), (float)rc.left, (float)rc.top,
-               (float)(rc.right - rc.left), (float)(rc.bottom - rc.top), 0);
-    float bx = (float)rc.left + 0.5f, by = (float)rc.top + 0.5f;
-    float bw = (float)(rc.right - rc.left) - 1.0f, bh = (float)(rc.bottom - rc.top) - 1.0f;
-    fill_round(g, argb(fill, 255), bx, by, bw, bh, 8.0f);
-    stroke_round(g, argb(border, 255), bx, by, bw, bh, 8.0f, 1.0f);
+    float w = (float)(rc.right - rc.left), h = (float)(rc.bottom - rc.top);
+    box_fill(g, g_pal.paper, 255, (float)rc.left, (float)rc.top, w, h);
+    float cut = 7.0f;
+    fill_cut(g, fill, 255, (float)rc.left + 1, (float)rc.top + 1, w - 2, h - 2, cut, 2);
+    stroke_cut(g, border, 200, (float)rc.left + 1, (float)rc.top + 1, w - 2, h - 2, cut, 2, 1);
 
     wchar_t label[64] = { 0 };
     GetWindowTextW(dis->hwndItem, label, 64);
-    GpFont *f = font_get(15, FONT_UI);
+    GpFont *f = font_get(14, FONT_UI);
     int dy = pressed ? 1 : 0;
-    text_draw_a(g, label, f, txt, 255, (float)rc.left,
-                (float)(rc.top + dy), (float)(rc.right - rc.left),
-                (float)(rc.bottom - rc.top), 1);
+    text_cy(g, label, f, txt, 255, (float)rc.left, (float)rc.top + h * 0.5f + dy, w, 1, 14);
 
     GdipDeleteGraphics(g);
 }
@@ -1597,52 +2083,69 @@ static void ed_list_draw(const DRAWITEMSTRUCT *dis) {
     int done = (int)dis->itemData;
     int selected = (dis->itemState & ODS_SELECTED) != 0;
 
-    HBRUSH bg = CreateSolidBrush(selected ? RGB(30, 41, 66) : RGB(22, 29, 45));
-    FillRect(dis->hDC, &dis->rcItem, bg);
+    RECT rc = dis->rcItem;
+    HBRUSH bg = CreateSolidBrush(selected ? RGB(0xE4, 0xE4, 0xE0) : RGB(0xFF, 0xFF, 0xFF));
+    FillRect(dis->hDC, &rc, bg);
     DeleteObject(bg);
 
-    RECT rc = dis->rcItem;
-    int box = 15, pad = 10;
+    /* 选中：左侧 trace 竖条 */
+    if (selected) {
+        RECT bar = { rc.left, rc.top + 2, rc.left + 3, rc.bottom - 2 };
+        HBRUSH bb = CreateSolidBrush(g_dark ? RGB(0xFF, 0xFA, 0x00) : RGB(0x16, 0x16, 0x16));
+        FillRect(dis->hDC, &bar, bb);
+        DeleteObject(bb);
+    }
+
+    int box = 14, pad = 12;
     int by = rc.top + (rc.bottom - rc.top - box) / 2;
     RECT cb = { rc.left + pad, by, rc.left + pad + box, by + box };
 
-    HBRUSH fill = CreateSolidBrush(done ? RGB(53, 196, 143) : RGB(22, 29, 45));
-    HPEN pen = CreatePen(PS_SOLID, 1, done ? RGB(53, 196, 143) : RGB(90, 100, 120));
-    HGDIOBJ ob = SelectObject(dis->hDC, fill);
-    HGDIOBJ op = SelectObject(dis->hDC, pen);
-    RoundRect(dis->hDC, cb.left, cb.top, cb.right, cb.bottom, 6, 6);
-    SelectObject(dis->hDC, ob);
-    SelectObject(dis->hDC, op);
-    DeleteObject(fill);
-    DeleteObject(pen);
-
-    if (done) {
-        HPEN check = CreatePen(PS_SOLID, 2, RGB(11, 17, 28));
-        HGDIOBJ oc = SelectObject(dis->hDC, check);
-        MoveToEx(dis->hDC, cb.left + 3, cb.top + 7, NULL);
-        LineTo(dis->hDC, cb.left + 6, cb.top + 10);
-        LineTo(dis->hDC, cb.left + 11, cb.top + 4);
-        SelectObject(dis->hDC, oc);
-        DeleteObject(check);
+    GpGraphics *g = NULL;
+    GdipCreateFromHDC(dis->hDC, &g);
+    if (g) {
+        GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+        Box bb = { (float)cb.left, (float)cb.top, (float)box, (float)box };
+        draw_check(g, bb, done, 0, 1.0f);
+        GdipDeleteGraphics(g);
     }
 
     wchar_t text[TODO_TEXT + 8] = { 0 };
     SendMessageW(g_ed_list, LB_GETTEXT, dis->itemID, (LPARAM)text);
 
     SetBkMode(dis->hDC, TRANSPARENT);
-    SetTextColor(dis->hDC, done ? RGB(120, 128, 145) : RGB(244, 247, 252));
+    SetTextColor(dis->hDC, done ? RGB(0x5C, 0x5C, 0x5C) : RGB(0x16, 0x16, 0x16));
     HFONT old = (HFONT)SelectObject(dis->hDC, g_ed_font);
     RECT tr = rc;
-    tr.left = cb.right + 10;
+    tr.left = cb.right + 12;
     DrawTextW(dis->hDC, text, -1, &tr,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     SelectObject(dis->hDC, old);
 
-    if (dis->itemState & ODS_FOCUS) {
-        RECT f = rc;
-        InflateRect(&f, -1, -1);
-        DrawFocusRect(dis->hDC, &f);
+    if (done) {
+        /* 完成：划线 */
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(0x5C, 0x5C, 0x5C));
+        HGDIOBJ op = SelectObject(dis->hDC, pen);
+        SIZE sz = { 0, 0 };
+        HFONT of = (HFONT)SelectObject(dis->hDC, g_ed_font);
+        GetTextExtentPoint32W(dis->hDC, text, (int)wcslen(text), &sz);
+        SelectObject(dis->hDC, of);
+        int ly = rc.top + (rc.bottom - rc.top) / 2;
+        int lx = cb.right + 12;
+        int maxx = rc.right - 12;
+        if (lx + sz.cx > maxx) sz.cx = maxx - lx;
+        MoveToEx(dis->hDC, lx, ly, NULL);
+        LineTo(dis->hDC, lx + sz.cx, ly);
+        SelectObject(dis->hDC, op);
+        DeleteObject(pen);
     }
+
+    /* 行分隔线 */
+    HPEN line = CreatePen(PS_SOLID, 1, RGB(0xD9, 0xD9, 0xD6));
+    HGDIOBJ ol = SelectObject(dis->hDC, line);
+    MoveToEx(dis->hDC, rc.left + 10, rc.bottom - 1, NULL);
+    LineTo(dis->hDC, rc.right - 10, rc.bottom - 1);
+    SelectObject(dis->hDC, ol);
+    DeleteObject(line);
 }
 
 static void ed_draw_scrollbar(GpGraphics *g);
@@ -1668,15 +2171,15 @@ static LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 float x = (float)g_ed_field.left + 0.5f, y = (float)g_ed_field.top + 0.5f;
                 float w = (float)(g_ed_field.right - g_ed_field.left) - 1.0f;
                 float h = (float)(g_ed_field.bottom - g_ed_field.top) - 1.0f;
-                fill_round(g, argb(0x161D2D, 255), x, y, w, h, 8.0f);
-                stroke_round(g, argb(0x2C3752, 255), x, y, w, h, 8.0f, 1.0f);
+                fill_round(g, argb(0xFFFFFF, 255), x, y, w, h, 0.0f);
+                stroke_round(g, argb(0x161616, 200), x, y, w, h, 0.0f, 1.0f);
             }
             /* 列表区边框 + 细滚动指示 */
             if (g_ed_list_rect.right > g_ed_list_rect.left) {
                 float x = (float)g_ed_list_rect.left + 0.5f, y = (float)g_ed_list_rect.top + 0.5f;
                 float w = (float)(g_ed_list_rect.right - g_ed_list_rect.left) - 1.0f;
                 float h = (float)(g_ed_list_rect.bottom - g_ed_list_rect.top) - 1.0f;
-                stroke_round(g, argb(0x2C3752, 255), x, y, w, h, 10.0f, 1.0f);
+                stroke_round(g, argb(0xD9D9D6, 255), x, y, w, h, 0.0f, 1.0f);
                 ed_draw_scrollbar(g);
             }
             GdipDeleteGraphics(g);
@@ -1688,14 +2191,14 @@ static LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = (HDC)wp;
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, GetDlgCtrlID((HWND)lp) == ID_ED_HINT
-                        ? RGB(110, 120, 140) : RGB(244, 247, 252));
+                        ? RGB(0x5C, 0x5C, 0x5C) : RGB(0x16, 0x16, 0x16));
         return (LRESULT)g_ed_bg_brush;
     }
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX: {
         HDC dc = (HDC)wp;
-        SetBkColor(dc, RGB(22, 29, 45));
-        SetTextColor(dc, RGB(244, 247, 252));
+        SetBkColor(dc, RGB(0xFF, 0xFF, 0xFF));
+        SetTextColor(dc, RGB(0x16, 0x16, 0x16));
         return (LRESULT)g_ed_edit_brush;
     }
 
@@ -1795,8 +2298,8 @@ static void ed_draw_scrollbar(GpGraphics *g) {
     if (ratio > 1) ratio = 1;
     float thumb_y = track_y + (track_h - thumb_h) * ratio;
 
-    fill_round(g, argb(0x1B2436, 255), track_x, track_y, 3.0f, track_h, 1.5f);
-    fill_round(g, argb(0x3A4763, 255), track_x, thumb_y, 3.0f, thumb_h, 1.5f);
+    fill_round(g, argb(0xE4E4E0, 255), track_x, track_y, 3.0f, track_h, 1.5f);
+    fill_round(g, argb(0x9A9A96, 255), track_x, thumb_y, 3.0f, thumb_h, 1.5f);
 }
 
 static void ed_layout(HWND hwnd) {
@@ -1847,6 +2350,8 @@ static void ed_layout(HWND hwnd) {
 
 /* 暗色标题栏 + 暗色滚动条，尽量和主画面统一 */
 static void editor_dark_chrome(void) {
+    /* 浅色主题：不去套暗色标题栏，只让滚动条别太突兀 */
+    if (0) {
     HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
     if (dwm) {
         typedef HRESULT(WINAPI * SetAttr)(HWND, DWORD, LPCVOID, DWORD);
@@ -1863,10 +2368,11 @@ static void editor_dark_chrome(void) {
         typedef HRESULT(WINAPI * SetTheme)(HWND, LPCWSTR, LPCWSTR);
         SetTheme set_theme = (SetTheme)(void *)GetProcAddress(ux, "SetWindowTheme");
         if (set_theme) {
-            set_theme(g_ed_list, L"DarkMode_Explorer", NULL);
-            set_theme(g_ed_edit, L"DarkMode_CFD", NULL);
+            set_theme(g_ed_list, L"Explorer", NULL);
+            set_theme(g_ed_edit, L"CFD", NULL);
         }
         FreeLibrary(ux);
+    }
     }
 }
 
@@ -1877,15 +2383,15 @@ static void show_editor(void) {
         return;
     }
     if (!g_ed_font) {
-        g_ed_font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+        g_ed_font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                 DEFAULT_PITCH | FF_SWISS, g_face_ui);
-        g_ed_font_title = CreateFontW(-20, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+        g_ed_font_title = CreateFontW(-19, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
                                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                      DEFAULT_PITCH | FF_SWISS, g_face_display);
+                                      DEFAULT_PITCH | FF_SWISS, g_face_ui);
     }
-    if (!g_ed_bg_brush) g_ed_bg_brush = CreateSolidBrush(RGB(18, 24, 38));
-    if (!g_ed_edit_brush) g_ed_edit_brush = CreateSolidBrush(RGB(22, 29, 45));
+    if (!g_ed_bg_brush) g_ed_bg_brush = CreateSolidBrush(RGB(0xF4, 0xF4, 0xF2));
+    if (!g_ed_edit_brush) g_ed_edit_brush = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
 
     HINSTANCE hinst = GetModuleHandleW(NULL);
     if (!g_ed_registered) {
@@ -2082,6 +2588,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (g_list_alpha > target) g_list_alpha = fmax(target, g_list_alpha - speed);
         int animating = (g_list_alpha != prev_alpha);
 
+        /* 按钮悬停：黄色从左擦入 */
+        {
+            double step = dt * 14.0;
+            if (step > 1.0) step = 1.0;
+            for (int i = 0; i < UI_COUNT; i++) {
+                double want = (g_ui_hover == i) ? 1.0 : 0.0;
+                if (g_btn_hover_t[i] < want) {
+                    g_btn_hover_t[i] += step;
+                    if (g_btn_hover_t[i] > want) g_btn_hover_t[i] = want;
+                    animating = 1;
+                } else if (g_btn_hover_t[i] > want) {
+                    g_btn_hover_t[i] -= step;
+                    if (g_btn_hover_t[i] < want) g_btn_hover_t[i] = want;
+                    animating = 1;
+                }
+            }
+        }
+
         if (g_breath_period > 1.0)
             g_breath_phase = fmod(g_breath_phase + dt * 6.283185307179586 / g_breath_period,
                                   6.283185307179586);
@@ -2145,6 +2669,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case 'N': case VK_F5: pomo_skip(&g_pomo); update_title();
                   InvalidateRect(hwnd, NULL, FALSE); return 0;
         case 'T': case VK_F6: g_opacity_index++; apply_opacity(); return 0;
+        case 'D': case VK_F7:
+            palette_set(!g_dark);
+            settings_save();
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
         case VK_F11: toggle_fullscreen(); return 0;
         case 'L': list_toggle_pin();
                   InvalidateRect(hwnd, NULL, FALSE); return 0;
@@ -2173,9 +2702,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         RECT rc;
         GetClientRect(hwnd, &rc);
-        int hit = ui_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
-        if (hit != g_ui_hover) {
+        int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
+        int hit = ui_hit(mx, my);
+        int row = hit_row(mx, my, rc.right, rc.bottom);
+        int dia = hit_dial(mx, my, rc.right, rc.bottom);
+        if (hit != g_ui_hover || row != g_hover_row) {
             g_ui_hover = hit;
+            g_hover_row = row;
             InvalidateRect(hwnd, NULL, FALSE);
         }
         if (!g_ui_tracking) {
@@ -2183,16 +2716,30 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             TrackMouseEvent(&tme);
             g_ui_tracking = 1;
         }
+        SetCursor(LoadCursorW(NULL, (hit >= 0 || row >= 0 || dia) ? IDC_HAND : IDC_ARROW));
         return 0;
     }
 
     case WM_MOUSELEAVE:
         g_ui_tracking = 0;
-        if (g_ui_hover != -1) {
+        if (g_ui_hover != -1 || g_hover_row != -1) {
             g_ui_hover = -1;
+            g_hover_row = -1;
             InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
+
+    case WM_MOUSEWHEEL: {
+        int delta = GET_WHEEL_DELTA_WPARAM(wp);
+        if (g_ntodos > 0) {
+            if (delta < 0) { if (g_scroll < g_ntodos - 1) g_scroll++; }
+            else { if (g_scroll > 0) g_scroll--; }
+            g_list_pinned = 1;
+            g_list_alpha = 1;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+    }
 
     case WM_LBUTTONUP: {
         RECT rc;
@@ -2204,26 +2751,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         ReleaseCapture();
         if (was >= 0 && was == hit) {
             switch (was) {
-            case UI_RUN:
-                g_pomo.running = !g_pomo.running;
-                break;
-            case UI_RESET:
-                pomo_reset(&g_pomo);
-                break;
-            case UI_SKIP:
-                pomo_skip(&g_pomo);
-                break;
-            case UI_LIST:
-                list_toggle_pin();
-                break;
-            case UI_EDIT:
-                show_editor();
-                break;
-            case UI_QUIT:
-                DestroyWindow(hwnd);
-                return 0;
+            case UI_RUN:   g_pomo.running = !g_pomo.running; break;
+            case UI_RESET: pomo_reset(&g_pomo); break;
+            case UI_SKIP:  pomo_skip(&g_pomo); break;
+            case UI_LIST:  list_toggle_pin(); break;
+            case UI_EDIT:  show_editor(); break;
+            case UI_QUIT:  DestroyWindow(hwnd); return 0;
             }
             update_title();
+        }
+        if (g_row_press >= 0) {
+            int row = hit_row(mx, my, rc.right, rc.bottom);
+            if (row == g_row_press && row >= 0) {
+                todo_toggle(row);
+                todo_save();
+                g_todo_sel = row;
+            }
+            g_row_press = -1;
         }
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
@@ -2232,45 +2776,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         RECT rc;
         GetClientRect(hwnd, &rc);
-        int w = rc.right, h = rc.bottom;
-        float k = kk(h);
         int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
 
-        /* 先看有没有点在底部按钮上 */
-        {
-            int hit = ui_hit(mx, my);
-            if (hit >= 0) {
-                g_ui_press = hit;
-                SetCapture(hwnd);
-                InvalidateRect(hwnd, NULL, FALSE);
-                return 0;
-            }
-        }
-
-        /* 点进度环：开始/暂停 */
-        double radius = k * 78.0;
-        double ring_cx = margin_l(w) + radius;
-        double ring_cy = h * 0.612;
-        if (hypot(mx - ring_cx, my - ring_cy) <= radius * 1.3) {
-            g_pomo.running = !g_pomo.running;
-            update_title();
+        int hit = ui_hit(mx, my);
+        if (hit >= 0) {
+            g_ui_press = hit;
+            SetCapture(hwnd);
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
 
-        /* 点玻璃卡片里的某一行：切换完成 */
-        if (g_list_alpha > 0.5 && g_ntodos > 0) {
-            Card c = todo_card(w, h);
-            float top = c.y0 + c.pad + c.header;
-            int first = (g_todo_sel >= c.rows) ? g_todo_sel - c.rows + 1 : 0;
-            if (mx >= c.x0 && mx <= c.x1 && my >= top && my < top + c.row_h * c.rows) {
-                int i = first + (int)((my - top) / c.row_h);
-                if (i >= 0 && i < g_ntodos) {
-                    todo_toggle(i);
-                    todo_save();
-                    InvalidateRect(hwnd, NULL, FALSE);
-                }
-            }
+        int row = hit_row(mx, my, rc.right, rc.bottom);
+        if (row >= 0) {
+            g_row_press = row;
+            g_todo_sel = row;
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+
+        if (hit_dial(mx, my, rc.right, rc.bottom)) {
+            g_pomo.running = !g_pomo.running;
+            update_title();
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
         }
         return 0;
     }
@@ -2279,10 +2807,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         POINT pt;
         GetCursorPos(&pt);
         ScreenToClient(hwnd, &pt);
-        if (ui_hit(pt.x, pt.y) >= 0)
-            SetCursor(LoadCursorW(NULL, IDC_HAND));
-        else
-            SetCursor(LoadCursorW(NULL, IDC_ARROW));
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int hand = (ui_hit(pt.x, pt.y) >= 0) || hit_row(pt.x, pt.y, rc.right, rc.bottom) >= 0 ||
+                   hit_dial(pt.x, pt.y, rc.right, rc.bottom);
+        SetCursor(LoadCursorW(NULL, hand ? IDC_HAND : IDC_ARROW));
         return TRUE;
     }
 
@@ -2429,8 +2958,25 @@ int main(int argc, char **argv) {
     SetConsoleOutputCP(CP_UTF8);
     pomo_init(&g_pomo);
 
+    palette_set(0);
     int want_selftest = 0, want_help = 0;
+    wchar_t render_path[MAX_PATH] = { 0 };
+    int render_w = 1920, render_h = 1080;
+    int theme_override = -1;
     for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--dark")) theme_override = 1;
+        if (!strcmp(argv[i], "--theme") && i + 1 < argc) {
+            theme_override = strcmp(argv[++i], "dark") ? 0 : 1;
+        }
+        if (!strcmp(argv[i], "--render") && i + 1 < argc) {
+            MultiByteToWideChar(CP_UTF8, 0, argv[++i], -1, render_path, MAX_PATH);
+        }
+        if (!strcmp(argv[i], "--size") && i + 1 < argc) {
+            int ww = 0, hh = 0;
+            if (sscanf(argv[++i], "%dx%d", &ww, &hh) == 2 && ww > 0 && hh > 0) {
+                render_w = ww; render_h = hh;
+            }
+        }
         if (!strcmp(argv[i], "--selftest")) want_selftest = 1;
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) want_help = 1;
         if (!strcmp(argv[i], "--window")) g_fullscreen = 0;
@@ -2541,15 +3087,18 @@ int main(int argc, char **argv) {
                "  --mute            不响提示音\n"
                "  --test-chime      试听提示音后退出\n"
                "  --font-check      打印实际使用的字体\n"
+               "  --theme light|dark 启动主题（默认浅色）\n"
+               "  --render P --size WxH  把界面渲染成 PNG 后退出（版式自检）\n"
                "  --selftest        只跑 26 项自测，不开窗口\n"
                "按键: 空格 开始/暂停 · R/F4 重置 · N/F5 跳过 · L/F3 待办 · E/F2 编辑\n"
-               "      T/F6 透明度 · F11 窗口/全屏 · Esc 退出\n");
+               "      T/F6 透明度 · D/F7 深浅 · F11 窗口/全屏 · Esc 退出\n");
         return 0;
     }
 
     g_pomo.total = g_pomo.remaining = g_pomo.work_min * 60.0;
     settings_path_init();
     settings_load();
+    if (theme_override >= 0) palette_set(theme_override);
     if (!g_todo_path[0]) todo_path_init();
     todo_load();
 
@@ -2564,10 +3113,21 @@ int main(int argc, char **argv) {
 
     resolve_families();
 
+    if (theme_override >= 0) palette_set(theme_override);
+
     if (g_bg_image[0]) {
         if (!bg_image_load(g_bg_image)) {
             g_bg_image[0] = 0;      /* 图片失效就退回内置渐变 */
         }
+    }
+
+    if (render_path[0]) {
+        g_list_pinned = 1;
+        g_list_alpha = 1;
+        int ok = render_png(render_path, render_w, render_h);
+        printf("%s %dx%d -> %ls\n", ok ? "已渲染" : "渲染失败", render_w, render_h, render_path);
+        GdiplusShutdown(token);
+        return ok ? 0 : 1;
     }
 
     SetProcessDPIAware();

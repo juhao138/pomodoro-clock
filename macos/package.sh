@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 
 ROOT="$(cd .. && pwd)"
 APP="$ROOT/dist/桌面番茄钟.app"
-DMG="$ROOT/dist/桌面番茄钟-1.0.dmg"
+DMG="$ROOT/dist/桌面番茄钟-2.0.dmg"
 STAGE="$ROOT/.build/dmgroot"
 MNT="$ROOT/.build/mnt"
 

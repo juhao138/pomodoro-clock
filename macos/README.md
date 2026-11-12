@@ -1,6 +1,6 @@
-# 桌面番茄钟 · macOS 版 1.0
+# 桌面番茄钟 · macOS 版 2.0
 
-> 版本 1.0 · 通用二进制（x86_64 + arm64）· 要求 macOS 12 以上
+> 版本 2.0 · 通用二进制（x86_64 + arm64）· 要求 macOS 12 以上
 
 Windows 版是 Win32 + GDI+ 的单文件程序。macOS 没有这两样东西，所以这一版重写为
 **Swift + AppKit + Core Graphics 的原生应用**：窗口、文字、圆盘、切角、命中区域全部自绘，
@@ -46,7 +46,7 @@ macOS 版新加的：
 
 ## 运行
 
-从 [Releases](https://github.com/juhao138/pomodoro-clock/releases/latest) 下载 `pomodoro-clock-v1.7.0-macos.dmg`，
+从 [Releases](https://github.com/juhao138/pomodoro-clock/releases/latest) 下载 `pomodoro-clock-v2.0.0-macos.dmg`，
 双击挂载后把「桌面番茄钟」拖进「应用程序」即可。自己编译的话：
 
 ```bash
@@ -104,14 +104,14 @@ open dist/桌面番茄钟.app          # 或双击
 ```bash
 cd macos
 ./build.sh        # 编译通用二进制（x86_64 + arm64）+ 组装 dist/桌面番茄钟.app + 本地签名
-./package.sh      # 再打一个 dist/桌面番茄钟-1.0.dmg（内含「应用程序」替身）
+./package.sh      # 再打一个 dist/桌面番茄钟-2.0.dmg（内含「应用程序」替身）
 ```
 
 产物：
 
 ```
 dist/桌面番茄钟.app          双击即可运行
-dist/桌面番茄钟-1.0.dmg      拷到别的机器，拖进「应用程序」安装
+dist/桌面番茄钟-2.0.dmg      拷到别的机器，拖进「应用程序」安装
 ```
 
 图标由 `macos/scripts/make_icon.py` 生成（需要 Pillow），产物 `macos/Resources/AppIcon.icns` 已经提交，

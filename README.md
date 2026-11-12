@@ -4,8 +4,8 @@
 
 | 平台 | 版本 | 实现 | 怎么装 |
 |---|---|---|---|
-| Windows | 1.6.0 | Win32 + GDI+，单文件 300 KB，不依赖任何运行库 | [下载 exe](https://github.com/juhao138/pomodoro-clock/releases/tag/v1.6.0) |
-| **macOS** | **1.0** | Swift + AppKit + Core Graphics 原生应用，通用二进制 | [下载 dmg](https://github.com/juhao138/pomodoro-clock/releases/latest) |
+| Windows | **2.0.0** | Win32 + GDI+，单文件 260 KB，界面重做成控制台风格 | [下载 exe](https://github.com/juhao138/pomodoro-clock/releases/latest) |
+| **macOS** | **2.0.0** | Swift + AppKit + Core Graphics 原生应用，通用二进制 | [下载 dmg](https://github.com/juhao138/pomodoro-clock/releases/latest) |
 
 ![主界面](docs/screenshots/main.png)
 
@@ -18,7 +18,7 @@
 |---|---|
 | ![](docs/screenshots-macos/home-light.png) | ![](docs/screenshots-macos/home-dark.png) |
 
-- **安装** — 从 [Releases](https://github.com/juhao138/pomodoro-clock/releases/latest) 下载 `pomodoro-clock-v1.7.0-macos.dmg`，双击挂载，把「桌面番茄钟」拖进「应用程序」；也可以 `cd macos && ./package.sh` 自己打一个
+- **安装** — 从 [Releases](https://github.com/juhao138/pomodoro-clock/releases/latest) 下载 `pomodoro-clock-v2.0.0-macos.dmg`，双击挂载，把「桌面番茄钟」拖进「应用程序」；也可以 `cd macos && ./package.sh` 自己打一个
 - **通用二进制** — x86_64 + arm64，Intel 与 Apple Silicon 都能跑，要求 macOS 12 以上
 - **和 Windows 版一致** — 番茄钟状态机（含超时结转、每 4 个专注进长休）、`todo.txt` 格式、命令行参数、`--selftest`
 - **macOS 版多出来的** — 深色主题、↑↓ 选待办、滚轮翻页、跟随系统「减弱动态效果」
@@ -26,25 +26,20 @@
 
 ## 功能（Windows 版）
 
-- **时钟是主角** — 雅黑粗体超大字号，每秒刷新，左侧对齐，一眼看清几点
-- **番茄钟** — 专注 25 / 短休 5 / 长休 15，每 4 个专注自动进长休，阶段自动衔接
-- **待办清单** — 毛玻璃卡片，定时浮出（默认每 30 秒露 8 秒），也可以按 L 常驻
-- **可点的按钮** — 底部一排药丸按钮，悬停变亮、按下下沉、鼠标变手型
-- **一个设置窗口** — 待办清单 + 背景图片都在里面，按 E 打开，随时关掉不影响主画面
-- **自定义背景图** — 选一张图等比铺满，自动压暗保证文字可读，选择会记住
-- **动态明暗** — 极光 / 背景图以 18 秒为周期缓慢呼吸，静止画面也不死板
+- **时钟是主角** — 横贯整个窗口的宽体数字，每秒刷新
+- **番茄钟** — 专注 25 / 短休 5 / 长休 15，每 4 个专注自动进长休，阶段自动衔接，超时时间结转到下一阶段
+- **分段圆盘** — 60 格刻度环显示进度，当前那一格是黄色；环内是剩余时间和阶段
+- **本轮进度与下一次** — 4 段进度块、已完成次数、下次是短休还是长休
+- **待办看板** — 定时浮出（默认每 30 秒露 8 秒），按 L 常驻；点勾选框切换完成，滚轮翻页
+- **一个设置窗口** — 待办清单 + 背景图片都在里面，按 E 打开
+- **浅色 / 深色两套主题** — 按 D 切换，选择记在 settings.ini
 - **柔和提示音** — 程序内合成的风铃音（E5-G5-C6 琶音），不依赖音频文件
-- **低占用** — 前台 CPU 约 4%，内存 32 MB；窗口不在前台时自动降到约 2fps
 
 ## 截图（Windows 版）
 
-| 默认渐变背景 | 自定义背景图 |
+| 浅色 | 深色 |
 |---|---|
-| ![](docs/screenshots/main.png) | ![](docs/screenshots/custom-bg.png) |
-
-**设置窗口**（待办清单 + 背景图片）
-
-![设置窗口](docs/screenshots/settings.png)
+| ![](docs/screenshots/main.png) | ![](docs/screenshots/main-dark.png) |
 
 ## 快速开始（Windows）
 
@@ -56,7 +51,7 @@
 [ 开始/暂停 ]  [ 重置 ]  [ 跳过 ]  [ 待办 ]  [ 设置 ]  [ 退出 ]
 ```
 
-「待办」按下立刻收起卡片，「设置」打开设置窗口。
+「待办」按下立刻收起看板，「设置」打开设置窗口；点圆盘也能开始 / 暂停。
 
 ### 键盘
 
@@ -65,9 +60,10 @@
 | 空格 | 开始 / 暂停（点进度环也行） | |
 | R | 重置回专注 25:00 | F4 |
 | N | 跳过当前阶段 | F5 |
-| L | 待办常驻 / 收起 | F3 |
+| L | 待办常驻 / 收起（也可以点看板底部的「常驻」） | F3 |
 | E | 打开设置窗口 | F2 |
 | T | 透明度循环（100% / 91% / 78% / 66%） | F6 |
+| D | 浅色 / 深色 | F7 |
 | ↑ ↓ | 选择待办条目 | |
 | F11 | 全屏 ↔ 窗口（980×640） | |
 | Esc | 退出 | |
@@ -88,6 +84,8 @@
 桌面时钟番茄钟.exe --mute                              # 不响提示音
 桌面时钟番茄钟.exe --test-chime                        # 试听提示音
 桌面时钟番茄钟.exe --font-check                        # 打印实际使用的字体
+桌面时钟番茄钟.exe --theme dark                         # 深色主题启动
+桌面时钟番茄钟.exe --render out.png --size 1920x1080   # 把界面渲染成 PNG（版式自检）
 桌面时钟番茄钟.exe --selftest                          # 跑 26 项自测，不开窗口
 ```
 
@@ -115,7 +113,8 @@ bg_image=D:\wallpaper.jpg
 python _build\make_clock_icon.py                       :: 生成 _build\clock.ico
 python _build\make_res.py _build\clock.ico _build\clock.res
 
-zig cc -O2 -std=c11 -Wl,--subsystem,windows -Wl,-e,mainCRTStartup ^
+zig cc -target x86_64-windows-gnu -O2 -std=c11 ^
+       -Wl,--subsystem,windows -Wl,-e,mainCRTStartup ^
        -o 桌面时钟番茄钟.exe pomodoro_clock.c _build\clock.res ^
        -lgdiplus -lgdi32 -luser32 -lole32 -lcomctl32 -limm32 -lwinmm -lmsimg32 -lcomdlg32
 ```
@@ -125,26 +124,21 @@ zig cc -O2 -std=c11 -Wl,--subsystem,windows -Wl,-e,mainCRTStartup ^
 
 ## 实现要点
 
-- **Win32 + GDI+**：圆角、弧线、文本全部抗锯齿；小字用 ClearType 并对齐整像素，
-  大字用灰度抗锯齿（避免彩色毛边）
+- **一套自绘**：纸面、细线、切角、刻度环、编号标签全部用 GDI+ 画，没有贴图、没有第三方控件
+- **字体**：拉丁用 Bahnschrift（Windows 10+ 自带的可变字体），中文用微软雅黑；GDI+ 只能拿到默认字重，
+  所以大字用「路径 + 描边」补出粗体
+- **切角**：一个 `cut_path()` 生成五边形，可填可描边；切角只出现在「可按」的东西上
+- **圆盘**：60 段圆弧，已过墨色、当前黄色、未到浅灰，每帧按剩余比例重算
 - **双缓冲**：画到 32 位 DIB Section 再 `BitBlt`，全屏不闪
-- **背景呼吸**：预渲染「暗相 / 亮相」两张背景，逐帧按正弦 `AlphaBlend` 交叉淡入，
-  呼吸的是极光本身而不是盖一层灰
-- **半分辨率合成**：背景按 1/2 分辨率渲染、合成，再拉伸到全屏 —— 渐变和光晕本来就平滑，
-  肉眼无差，但合成开销降到 1/4（CPU 9.9% → 4.4%，内存 49 → 32 MB）
-- **时钟位图缓存**：184px 的大字缓存成 ARGB 位图，每秒重建一次，其余帧直接贴
-- **毛玻璃卡片**：圆角裁剪 + 白色竖向渐变（12%→4%）+ 1px 描边 + 顶部高光 + 淡投影
-- **计时不漂移**：定时器 16ms 触发，但用 `GetTickCount64` 算真实 dt；
-  一次 tick 跨过阶段终点时，多余时间结转到下一阶段
-- **按需重绘**：只在淡入淡出、秒数变化、呼吸档位变化时刷屏
-- **分层窗口按需启用**：只有透明度 <100% 时才挂 `WS_EX_LAYERED`
-  （分层窗口会让系统禁用 ClearType，小字会发虚）
+- **计时不漂移**：16ms 定时器触发，但用 `GetTickCount64` 算真实 dt；跨过阶段终点时多余时间结转到下一阶段
+- **按需重绘**：只在秒数变化、淡入淡出、悬停变化时刷屏，静止时几乎不耗 CPU
+- **离屏自检**：`--render` 不建窗口直接渲染 PNG，改版式时不用开程序
 
 ## 目录
 
 ```
-pomodoro_clock.c            全部源码（约 2400 行，单文件）
-_build/make_clock_icon.py   用 Pillow 画图标
+pomodoro_clock.c            全部源码（约 3000 行，单文件）
+_build/make_clock_icon.py   用 Pillow 画图标（墨底 + 12 格刻度环）
 _build/make_res.py          把 .ico 打包成 .res 资源
 docs/使用说明.txt            面向使用者的中文说明
 docs/screenshots/           截图（Windows）
@@ -156,9 +150,9 @@ macos/                      macOS 版源码与说明（./build.sh 编译，./pac
 
 - 只覆盖主显示器
 - 全屏是普通置顶窗口，不阻止系统休眠
-- 设置窗口用系统 LISTBOX（条目自绘），滚动条是自绘的
+- 设置窗口用的是系统 LISTBOX / EDIT，只是换了配色和按钮外观，不是全自绘
 - 清单上限 128 条，单条 160 字
-- 背景图没有高斯模糊（GDI+ 无现成模糊，自己卷积代价太大）
+- 背景图压到 12% 垫在纸面下，不再做明暗呼吸
 
 ## 贡献者
 

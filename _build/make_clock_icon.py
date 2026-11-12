@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""生成番茄钟的图标：深色圆角底 + 番茄红进度环（和界面同风格）。
+"""生成番茄钟图标：墨色圆角底 + 12 格刻度环 + 一格黄（和界面同一套语言）。
 
 输出 _build/clock.ico（多尺寸）。
 """
+import math
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -10,59 +11,52 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "_build" / "clock.ico"
 
-BG = (18, 24, 38, 255)          # #121826
-RING = (255, 107, 90, 255)      # #FF6B5A
-TRACK = (35, 43, 61, 255)       # #232B3D
-DOT = (255, 255, 255, 255)
+INK = (22, 22, 22, 255)        # #161616
+PAPER = (244, 244, 242, 255)   # #F4F4F2
+SIGNAL = (255, 250, 0, 255)    # #FFFA00
 
 
 def draw(size: int) -> Image.Image:
-    ss = 4                                   # 超采样，缩小后边缘更干净
+    ss = 4
     n = size * ss
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
 
-    # 圆角底
-    pad = n * 0.055
-    d.rounded_rectangle([pad, pad, n - pad, n - pad],
-                        radius=n * 0.235, fill=BG)
+    # 圆角底（Windows 用直角也常见，这里跟 macOS 版一致用圆角）
+    base = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(base)
+    bd.rounded_rectangle((0, 0, n - 1, n - 1), radius=int(n * 0.18), fill=INK)
 
-    # 环
-    thick = n * 0.115
-    inset = n * 0.20
-    box = [inset, inset, n - inset, n - inset]
-    d.arc(box, start=0, end=360, fill=TRACK, width=int(thick))
+    d = ImageDraw.Draw(base)
+    cx = cy = n / 2.0
+    ring = n * 0.255
+    tick_len = n * 0.165
+    tick_w = n * 0.052
 
-    # 进度弧：从 12 点顺时针 300°，留 60° 缺口
-    d.arc(box, start=-90, end=-90 + 300, fill=RING, width=int(thick))
+    for i in range(12):
+        ang = math.radians(-90 + i * 30)
+        color = SIGNAL if i == 0 else PAPER
+        ln = tick_len * (1.12 if i == 0 else 1.0)
+        w = tick_w * (1.0 if i == 0 else 0.86)
+        ux, uy = math.cos(ang), math.sin(ang)
+        nx, ny = -uy, ux
+        r0, r1 = ring, ring + ln
+        pts = [
+            (cx + ux * r0 + nx * w / 2, cy + uy * r0 + ny * w / 2),
+            (cx + ux * r1 + nx * w / 2, cy + uy * r1 + ny * w / 2),
+            (cx + ux * r1 - nx * w / 2, cy + uy * r1 - ny * w / 2),
+            (cx + ux * r0 - nx * w / 2, cy + uy * r0 - ny * w / 2),
+        ]
+        d.polygon(pts, fill=color)
 
-    # 弧末端圆头
-    import math
-    ang = math.radians(-90 + 300)
-    r = (box[2] - box[0]) / 2
-    cx = (box[0] + box[2]) / 2
-    cy = (box[1] + box[3]) / 2
-    ex, ey = cx + r * math.cos(ang), cy + r * math.sin(ang)
-    rr = thick / 2
-    d.ellipse([ex - rr, ey - rr, ex + rr, ey + rr], fill=RING)
-    # 起始圆头
-    ang0 = math.radians(-90)
-    sx, sy = cx + r * math.cos(ang0), cy + r * math.sin(ang0)
-    d.ellipse([sx - rr, sy - rr, sx + rr, sy + rr], fill=RING)
-
-    # 中心点（像秒针轴）
-    cr = n * 0.022
-    d.ellipse([n / 2 - cr, n / 2 - cr, n / 2 + cr, n / 2 + cr], fill=DOT)
-
-    return img.resize((size, size), Image.LANCZOS)
+    img = base.resize((size, size), Image.LANCZOS)
+    return img
 
 
-def main() -> None:
-    sizes = [256, 128, 64, 48, 32, 24, 16]
+def main():
+    sizes = [16, 24, 32, 48, 64, 128, 256]
     frames = [draw(s) for s in sizes]
-    frames[0].save(OUT, format="ICO", sizes=[(s, s) for s in sizes],
-                   append_images=frames[1:])
-    print(f"{OUT.name} 生成完成，{len(sizes)} 个尺寸")
+    frames[-1].save(OUT, format="ICO", sizes=[(s, s) for s in sizes])
+    print("已生成", OUT)
 
 
 if __name__ == "__main__":
